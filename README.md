@@ -65,8 +65,7 @@
 
 Download the latest standalone executable from **[GitHub Releases](https://github.com/furrykit/FKVideoPlayer/releases)**:
 
-- **`FKVideoPlayer-v1.0.0-windows-x64.zip`**: Complete portable package including `FKVideoPlayer.exe` and `ffmpeg.exe`. Unpack and run — no Python or extra tools required!
-- **`FKVideoPlayer.exe`**: Standalone single-file executable with embedded runtime.
+- 🚀 **`FKVideoPlayer.exe`**: Complete all-in-one standalone executable (includes bundled FFmpeg, Python runtime, and all codecs). No installation, Python, or extra files required — just download and run!
 
 ---
 

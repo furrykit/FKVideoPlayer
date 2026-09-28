@@ -128,7 +128,7 @@ STRINGS = {
         'dlg_about_title': 'About FKVideoPlayer',
         'about_desc': 'High-performance next-gen video player, screen editor, live annotation tool and actions recorder.',
         'about_author': 'Created by furrykit',
-        'about_version': 'Version 2.0 Pro',
+        'about_version': 'Version 1.0.0',
         'btn_donate_link': 'Donate / Support Creator',
 
         'dlg_updates_title': 'Check for Updates',
@@ -266,7 +266,7 @@ STRINGS = {
         'dlg_about_title': 'О программе FKVideoPlayer',
         'about_desc': 'Высокопроизводительный видеоплеер, экранный редактор, инструмент живых аннотаций и рекордер действий нового поколения.',
         'about_author': 'Создано furrykit',
-        'about_version': 'Версия 2.0 Pro',
+        'about_version': 'Версия 1.0.0',
         'btn_donate_link': 'Поддержать автора / Донат',
 
         'dlg_updates_title': 'Проверка обновлений',
