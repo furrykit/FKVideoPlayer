@@ -31,11 +31,13 @@ def ensure_interactive_station():
         hwinsta = user32.OpenWindowStationW('WinSta0', False, 0x0000037F)
         if hwinsta:
             user32.SetProcessWindowStation(hwinsta)
-            hdesk = user32.OpenDesktopW('Default', 0, False, 0x000001FF)
-            if hdesk:
-                user32.SetThreadDesktop(hdesk)
+        hdesk = user32.OpenDesktopW('Default', 0, False, 0x000001FF)
+        if hdesk:
+            user32.SetThreadDesktop(hdesk)
+            return True
     except Exception:
         pass
+    return False
 
 def list_open_windows(filter_self_pid=None):
     """
@@ -97,6 +99,15 @@ def list_open_windows(filter_self_pid=None):
     except Exception:
         pass
 
+    if not results:
+        try:
+            hdesk = user32.OpenDesktopW('Default', 0, False, 0x000001FF)
+            if hdesk:
+                WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+                user32.EnumDesktopWindows(hdesk, WNDENUMPROC(enum_cb), 0)
+        except Exception:
+            pass
+
     return results
 
 def capture_window_frame(hwnd) -> np.ndarray:
@@ -104,8 +115,13 @@ def capture_window_frame(hwnd) -> np.ndarray:
     Captures window frame by HWND and returns BGR numpy array (suitable for OpenCV/QImage).
     Returns None if capture fails.
     """
-    if not HAS_WIN32 or not win32gui.IsWindow(hwnd):
+    if not HAS_WIN32:
         return None
+
+    if not win32gui.IsWindow(hwnd):
+        ensure_interactive_station()
+        if not win32gui.IsWindow(hwnd):
+            return None
 
     try:
         r = win32gui.GetClientRect(hwnd)
@@ -129,6 +145,8 @@ def capture_window_frame(hwnd) -> np.ndarray:
         # PW_RENDERFULLCONTENT = 2 captures DirectX/hardware accelerated browsers (Chrome, Edge, Firefox, Twitch)
         PW_RENDERFULLCONTENT = 2
         res = ctypes.windll.user32.PrintWindow(hwnd, saveDC.GetSafeHdc(), PW_RENDERFULLCONTENT)
+        if not res:
+            res = ctypes.windll.user32.PrintWindow(hwnd, saveDC.GetSafeHdc(), 0)
         if not res:
             # Fallback to direct BitBlt
             saveDC.BitBlt((0, 0), (w, h), mfcDC, (0, 0), win32con.SRCCOPY)
@@ -170,6 +188,7 @@ class WindowCaptureWorker(QThread):
 
     def run(self):
         import time
+        ensure_interactive_station()
         interval = 1.0 / self.target_fps
         t_start = time.perf_counter()
 

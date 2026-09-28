@@ -613,6 +613,9 @@ class VideoCanvas(QWidget):
         else:
             self.update()
 
+    def set_bgr_frame(self, frame_bgr):
+        self.set_frame(frame_bgr)
+
     def fit_to_view(self):
         if self.video_width <= 0 or self.video_height <= 0:
             self.zoom_factor = 1.0
@@ -1860,6 +1863,10 @@ class ProjectSession(QObject):
         self.is_capturing_window = False
         self.captured_window_hwnd = None
         self.captured_window_title = ""
+        self.temp_capture_writer = None
+        self.temp_capture_writer_size = None
+        self.temp_capture_video_path = None
+        self._capture_frame_count = 0
 
     def is_empty(self) -> bool:
         if self.cap is not None or self.video_path:
@@ -1890,6 +1897,13 @@ class ProjectSession(QObject):
                 pass
             self.window_capture_worker = None
         self.is_capturing_window = False
+
+        if self.temp_capture_writer is not None:
+            try:
+                self.temp_capture_writer.release()
+            except Exception:
+                pass
+            self.temp_capture_writer = None
 
         if self.cap is not None:
             try:
@@ -2196,6 +2210,50 @@ class FKVideoPlayer(QMainWindow):
         proj = self.active_project
         if proj:
             proj.captured_window_title = val
+
+    @property
+    def temp_capture_writer(self):
+        proj = self.active_project
+        return proj.temp_capture_writer if proj else None
+
+    @temp_capture_writer.setter
+    def temp_capture_writer(self, val):
+        proj = self.active_project
+        if proj:
+            proj.temp_capture_writer = val
+
+    @property
+    def temp_capture_writer_size(self):
+        proj = self.active_project
+        return proj.temp_capture_writer_size if proj else None
+
+    @temp_capture_writer_size.setter
+    def temp_capture_writer_size(self, val):
+        proj = self.active_project
+        if proj:
+            proj.temp_capture_writer_size = val
+
+    @property
+    def temp_capture_video_path(self):
+        proj = self.active_project
+        return proj.temp_capture_video_path if proj else None
+
+    @temp_capture_video_path.setter
+    def temp_capture_video_path(self, val):
+        proj = self.active_project
+        if proj:
+            proj.temp_capture_video_path = val
+
+    @property
+    def _capture_frame_count(self):
+        proj = self.active_project
+        return proj._capture_frame_count if proj else 0
+
+    @_capture_frame_count.setter
+    def _capture_frame_count(self, val):
+        proj = self.active_project
+        if proj:
+            proj._capture_frame_count = val
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -3398,9 +3456,11 @@ class FKVideoPlayer(QMainWindow):
         # Window capture frame recording
         if self.is_capturing_window:
             self.temp_capture_video_path = os.path.abspath(f"temp_capture_{int(time.time())}.mp4")
-            w, h = max(10, self.canvas.video_width), max(10, self.canvas.video_height)
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            self.temp_capture_writer = cv2.VideoWriter(self.temp_capture_video_path, fourcc, 30.0, (w, h))
+            self.temp_capture_writer = None
+            self.temp_capture_writer_size = None
+            self._capture_frame_count = 0
+            self.current_frame_idx = 0
+            self.total_frames = 0
             self.video_path = self.temp_capture_video_path
 
         self.recorder.start()
@@ -3440,8 +3500,17 @@ class FKVideoPlayer(QMainWindow):
 
         # Stop capture writer
         if self.temp_capture_writer is not None:
-            self.temp_capture_writer.release()
+            try:
+                self.temp_capture_writer.release()
+            except Exception:
+                pass
             self.temp_capture_writer = None
+            if self.is_capturing_window:
+                self.total_frames = self._capture_frame_count
+            else:
+                self.total_frames = max(self.total_frames, self._capture_frame_count)
+            if self.temp_capture_video_path and os.path.exists(self.temp_capture_video_path):
+                self.video_path = self.temp_capture_video_path
 
         self.btn_rec_start.setEnabled(True)
         self.btn_rec_pause.setEnabled(False)
@@ -3507,7 +3576,7 @@ class FKVideoPlayer(QMainWindow):
         progress_dialog.setMinimumDuration(0)
         progress_dialog.setValue(0)
 
-        v_path = self.video_path or getattr(self.recorder.player, 'video_path', '')
+        v_path = (self.temp_capture_video_path if self.temp_capture_video_path and os.path.exists(self.temp_capture_video_path) else None) or self.video_path or getattr(self.recorder.player, 'video_path', '')
         audio_target = self.last_mic_wav if cfg['include_audio'] else None
 
         self.export_worker = ExportVideoWorker(
@@ -3623,6 +3692,10 @@ class FKVideoPlayer(QMainWindow):
         self.is_capturing_window = True
         self.captured_window_hwnd = hwnd
         self.captured_window_title = title
+        self.total_frames = 0
+        self.current_frame_idx = 0
+        self.fps = 30.0
+        self.video_path = ""
         tab_name = f"Stream: {title[:16]}"
         if self.active_project:
             self.active_project.name = tab_name
@@ -3650,11 +3723,36 @@ class FKVideoPlayer(QMainWindow):
         self.is_capturing_window = False
 
     def _on_captured_window_frame(self, frame_bgr, timestamp):
-        if not self.is_capturing_window:
+        if not self.is_capturing_window or frame_bgr is None:
             return
         self.canvas.set_bgr_frame(frame_bgr)
-        if self.temp_capture_writer is not None:
-            self.temp_capture_writer.write(frame_bgr)
+
+        if self.recorder.is_recording():
+            h, w = frame_bgr.shape[:2]
+            if w <= 0 or h <= 0:
+                return
+
+            if self.temp_capture_writer is None:
+                target_w = (w // 2) * 2
+                target_h = (h // 2) * 2
+                self.temp_capture_writer_size = (target_w, target_h)
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                self.temp_capture_writer = cv2.VideoWriter(
+                    self.temp_capture_video_path, fourcc, 30.0, (target_w, target_h)
+                )
+                self.canvas.video_width = target_w
+                self.canvas.video_height = target_h
+                self.video_path = self.temp_capture_video_path
+
+            write_frame = frame_bgr
+            if (w, h) != self.temp_capture_writer_size:
+                write_frame = cv2.resize(frame_bgr, self.temp_capture_writer_size)
+
+            self.temp_capture_writer.write(write_frame)
+            self._capture_frame_count += 1
+            self.current_frame_idx = self._capture_frame_count - 1
+            self.total_frames = max(self.total_frames, self._capture_frame_count)
+            self.recorder.record_frame(force=True)
 
     def open_preferences_dialog(self):
         dlg = PreferencesDialog(parent=self)

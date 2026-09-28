@@ -980,6 +980,71 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         ov.close()
         print("[OK] Video overlay seeking, scrubbing, stepping, and paused frame rendering verified")
 
+    def test_38_window_capture_frame_recording_and_export(self):
+        import cv2
+        import numpy as np
+        from PyQt5.QtWidgets import QMessageBox
+
+        old_question = QMessageBox.question
+        QMessageBox.question = lambda *args, **kwargs: QMessageBox.No
+
+        try:
+            player = self.player
+            player.is_capturing_window = True
+            player.is_mic_enabled = False
+
+            # Start recording
+            player.start_actions_record()
+            self.assertTrue(player.recorder.is_recording())
+            self.assertIsNotNone(player.temp_capture_video_path)
+            self.assertEqual(player._capture_frame_count, 0)
+
+            # Feed 15 frames from captured window
+            test_w, test_h = 320, 240
+            for i in range(15):
+                dummy_frame = np.full((test_h, test_w, 3), i * 15, dtype=np.uint8)
+                player._on_captured_window_frame(dummy_frame, i / 30.0)
+
+            self.assertEqual(player._capture_frame_count, 15)
+            self.assertEqual(player.current_frame_idx, 14)
+            self.assertEqual(player.temp_capture_writer_size, (test_w, test_h))
+
+            # Check recorded events include 'frame' events with matching frame_idx
+            frame_events = [ev for ev in player.recorder.events if ev['type'] == 'frame']
+            self.assertGreaterEqual(len(frame_events), 15)
+            self.assertEqual(frame_events[-1]['frame_idx'], 14)
+
+            # Stop recording
+            saved_video_path = player.temp_capture_video_path
+            player.stop_actions_record()
+            self.assertIsNone(player.temp_capture_writer)
+            self.assertEqual(player.total_frames, 15)
+
+            # Verify the captured video file is valid and readable
+            self.assertTrue(os.path.exists(saved_video_path))
+            cap = cv2.VideoCapture(saved_video_path)
+            self.assertTrue(cap.isOpened())
+            read_frames = 0
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                read_frames += 1
+                self.assertEqual(frame.shape[:2], (test_h, test_w))
+            cap.release()
+            self.assertEqual(read_frames, 15)
+
+            # Clean up temporary test video
+            if os.path.exists(saved_video_path):
+                try:
+                    os.remove(saved_video_path)
+                except Exception:
+                    pass
+
+            print("[OK] Window capture live frame recording and ActionRecorder synchronization verified")
+        finally:
+            QMessageBox.question = old_question
+
 
 if __name__ == "__main__":
     unittest.main()
