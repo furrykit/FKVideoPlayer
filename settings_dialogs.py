@@ -112,9 +112,10 @@ QPushButton {
     color: #FFFFFF;
     border: 1px solid #3E3E52;
     border-radius: 6px;
-    padding: 7px 16px;
-    font-size: 13px;
+    padding: 6px 12px;
+    font-size: 12px;
     font-weight: 500;
+    min-width: 0px;
 }
 QPushButton:hover {
     background-color: #343448;
@@ -154,9 +155,9 @@ QTabWidget::pane {
 QTabBar::tab {
     background: #222230;
     color: #A0A0B8;
-    padding: 8px 16px;
-    min-width: 90px;
-    font-size: 13px;
+    padding: 6px 12px;
+    min-width: 60px;
+    font-size: 12px;
     border-top-left-radius: 6px;
     border-top-right-radius: 6px;
     margin-right: 4px;
@@ -496,6 +497,9 @@ DEFAULT_EXPORT_PRESETS = {
     },
     "Apple ProRes High-Fidelity": {
         "codec": "prores_ks", "format": "mov", "width": 1920, "height": 1080, "fps": 30, "bitrate": "50M"
+    },
+    "Custom (User Defined)": {
+        "codec": "libx264", "format": "mp4", "width": 1920, "height": 1080, "fps": 30, "bitrate": "10M"
     }
 }
 
@@ -591,10 +595,25 @@ class ExportDialog(QDialog):
         h_out.addWidget(btn_browse)
         layout.addLayout(h_out)
 
-        # Save Preset Button
+        # Preset action buttons (Save / Delete)
+        h_pres_act = QHBoxLayout()
         btn_save_preset = QPushButton(tr('dlg_export_save_preset'))
         btn_save_preset.clicked.connect(self._save_custom_preset)
-        layout.addWidget(btn_save_preset)
+        h_pres_act.addWidget(btn_save_preset)
+
+        self.btn_del_preset = QPushButton("🗑 Delete Preset")
+        self.btn_del_preset.clicked.connect(self._delete_custom_preset)
+        h_pres_act.addWidget(self.btn_del_preset)
+        layout.addLayout(h_pres_act)
+
+        # Connect controls to switch to Custom when modified
+        self._updating_preset = False
+        self.combo_codec.currentIndexChanged.connect(self._on_param_changed)
+        self.combo_format.currentIndexChanged.connect(self._on_param_changed)
+        self.spin_w.valueChanged.connect(self._on_param_changed)
+        self.spin_h.valueChanged.connect(self._on_param_changed)
+        self.spin_fps.valueChanged.connect(self._on_param_changed)
+        self.combo_bitrate.currentIndexChanged.connect(self._on_param_changed)
 
         layout.addStretch()
 
@@ -620,6 +639,36 @@ class ExportDialog(QDialog):
         except Exception:
             pass
 
+    def _on_param_changed(self):
+        if getattr(self, '_updating_preset', False):
+            return
+        idx = self.combo_presets.findText("Custom (User Defined)")
+        if idx >= 0 and self.combo_presets.currentIndex() != idx:
+            self.combo_presets.blockSignals(True)
+            self.combo_presets.setCurrentIndex(idx)
+            self.combo_presets.blockSignals(False)
+
+    def _delete_custom_preset(self):
+        name = self.combo_presets.currentText()
+        if name in DEFAULT_EXPORT_PRESETS:
+            QMessageBox.information(self, "Cannot Delete", "Built-in default presets cannot be deleted.")
+            return
+        reply = QMessageBox.question(self, "Delete Preset", f"Are you sure you want to delete preset '{name}'?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            self.presets.pop(name, None)
+            idx = self.combo_presets.findText(name)
+            if idx >= 0:
+                self.combo_presets.removeItem(idx)
+            try:
+                # Save remaining custom presets
+                custom_to_save = {k: v for k, v in self.presets.items() if k not in DEFAULT_EXPORT_PRESETS}
+                with open(PRESETS_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(custom_to_save, f, indent=2)
+            except Exception:
+                pass
+            self.combo_presets.setCurrentIndex(0)
+
     def _save_custom_preset(self):
         from PyQt5.QtWidgets import QInputDialog
         name, ok = QInputDialog.getText(self, "Save Export Preset", "Preset Name:")
@@ -636,8 +685,9 @@ class ExportDialog(QDialog):
             self.combo_presets.addItem(name.strip())
             self.combo_presets.setCurrentText(name.strip())
             try:
+                custom_to_save = {k: v for k, v in self.presets.items() if k not in DEFAULT_EXPORT_PRESETS}
                 with open(PRESETS_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(self.presets, f, indent=2)
+                    json.dump(custom_to_save, f, indent=2)
                 QMessageBox.information(self, "Preset Saved", f"Preset '{name.strip()}' saved successfully!")
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"Failed to save preset: {e}")
@@ -647,18 +697,22 @@ class ExportDialog(QDialog):
         p = self.presets.get(txt)
         if not p:
             return
-        idx_c = self.combo_codec.findData(p.get('codec'))
-        if idx_c >= 0:
-            self.combo_codec.setCurrentIndex(idx_c)
-        idx_f = self.combo_format.findData(p.get('format'))
-        if idx_f >= 0:
-            self.combo_format.setCurrentIndex(idx_f)
-        self.spin_w.setValue(p.get('width', 1920))
-        self.spin_h.setValue(p.get('height', 1080))
-        self.spin_fps.setValue(p.get('fps', 30))
-        idx_b = self.combo_bitrate.findData(p.get('bitrate'))
-        if idx_b >= 0:
-            self.combo_bitrate.setCurrentIndex(idx_b)
+        self._updating_preset = True
+        try:
+            idx_c = self.combo_codec.findData(p.get('codec'))
+            if idx_c >= 0:
+                self.combo_codec.setCurrentIndex(idx_c)
+            idx_f = self.combo_format.findData(p.get('format'))
+            if idx_f >= 0:
+                self.combo_format.setCurrentIndex(idx_f)
+            self.spin_w.setValue(p.get('width', 1920))
+            self.spin_h.setValue(p.get('height', 1080))
+            self.spin_fps.setValue(p.get('fps', 30))
+            idx_b = self.combo_bitrate.findData(p.get('bitrate'))
+            if idx_b >= 0:
+                self.combo_bitrate.setCurrentIndex(idx_b)
+        finally:
+            self._updating_preset = False
 
     def _browse_output(self):
         fmt = self.combo_format.currentData() or "mp4"
@@ -897,27 +951,65 @@ class VideoOverlaySettingsDialog(QDialog):
         self.overlay = overlay
         self.setWindowTitle(tr('dlg_overlay_video_title'))
         self.setStyleSheet(DIALOG_STYLE)
-        self.setFixedSize(460, 370)
+        self.setFixedSize(480, 440)
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
         fname = os.path.basename(getattr(self.overlay, 'file_path', 'video'))
         lbl_info = QLabel(f"Video: {fname}")
         lbl_info.setStyleSheet("font-weight: bold; color: #00E5FF; font-size: 14px;")
         layout.addWidget(lbl_info)
 
-        # Controls
+        # Controls & Stepping Row
         h_play = QHBoxLayout()
         is_playing = getattr(self.overlay, 'is_playing', True)
         self.btn_play_pause = QPushButton("❚❚ Pause" if is_playing else "▶ Play")
         self.btn_play_pause.clicked.connect(self._toggle_play)
         h_play.addWidget(self.btn_play_pause)
 
-        self.btn_restart = QPushButton("⏮ Restart")
+        self.btn_step_back_1s = QPushButton("-1s")
+        self.btn_step_back_1s.setToolTip("Rewind 1 second")
+        self.btn_step_back_1s.clicked.connect(lambda: self._seek_relative(-1.0))
+        h_play.addWidget(self.btn_step_back_1s)
+
+        self.btn_step_back_1f = QPushButton("-1f")
+        self.btn_step_back_1f.setToolTip("Step back 1 frame")
+        self.btn_step_back_1f.clicked.connect(lambda: self._step_frame(-1))
+        h_play.addWidget(self.btn_step_back_1f)
+
+        self.btn_step_fwd_1f = QPushButton("+1f")
+        self.btn_step_fwd_1f.setToolTip("Step forward 1 frame")
+        self.btn_step_fwd_1f.clicked.connect(lambda: self._step_frame(1))
+        h_play.addWidget(self.btn_step_fwd_1f)
+
+        self.btn_step_fwd_1s = QPushButton("+1s")
+        self.btn_step_fwd_1s.setToolTip("Forward 1 second")
+        self.btn_step_fwd_1s.clicked.connect(lambda: self._seek_relative(1.0))
+        h_play.addWidget(self.btn_step_fwd_1s)
+
+        self.btn_restart = QPushButton("⏮ 0s")
+        self.btn_restart.setToolTip("Restart overlay video from 0s")
         self.btn_restart.clicked.connect(self._restart_overlay)
         h_play.addWidget(self.btn_restart)
         layout.addLayout(h_play)
+
+        # Scrubber Slider & Time Label
+        h_scrub = QHBoxLayout()
+        self.slider_scrub = QSlider(Qt.Horizontal)
+        tot_frames = getattr(self.overlay, 'video_total_frames', 0)
+        self.slider_scrub.setRange(0, max(0, tot_frames - 1))
+        cur_f = getattr(self.overlay, 'video_cached_idx', 0)
+        self.slider_scrub.setValue(max(0, cur_f))
+        self.slider_scrub.valueChanged.connect(self._on_scrubber_changed)
+        h_scrub.addWidget(self.slider_scrub)
+
+        cur_t = self.overlay.get_current_time()
+        tot_dur = self.overlay.get_duration()
+        self.lbl_time = QLabel(f"{cur_t:.1f}s / {tot_dur:.1f}s")
+        self.lbl_time.setStyleSheet("font-family: Consolas, monospace; font-size: 11px; color: #9EABB8;")
+        h_scrub.addWidget(self.lbl_time)
+        layout.addLayout(h_scrub)
 
         # Loop & Sync
         self.check_loop = QCheckBox(tr('lbl_overlay_loop'))
@@ -946,7 +1038,6 @@ class VideoOverlaySettingsDialog(QDialog):
         layout.addLayout(h_spd)
 
         # Opacity slider
-        from PyQt5.QtWidgets import QSlider
         h_op = QHBoxLayout()
         h_op.addWidget(QLabel(tr('lbl_overlay_opacity')))
         self.slider_opacity = QSlider(Qt.Horizontal)
@@ -977,6 +1068,12 @@ class VideoOverlaySettingsDialog(QDialog):
         btn_close.clicked.connect(self.accept)
         layout.addWidget(btn_close)
 
+    def _update_time_label(self):
+        cur_t = self.overlay.get_current_time()
+        tot_dur = self.overlay.get_duration()
+        cur_f = getattr(self.overlay, 'video_cached_idx', 0)
+        self.lbl_time.setText(f"{cur_t:.1f}s / {tot_dur:.1f}s [F:{cur_f}]")
+
     def _toggle_play(self):
         cur = getattr(self.overlay, 'is_playing', True)
         self.overlay.is_playing = not cur
@@ -985,14 +1082,41 @@ class VideoOverlaySettingsDialog(QDialog):
             self.parent().update()
 
     def _restart_overlay(self):
-        self.overlay.start_offset = 0.0
+        self.overlay.seek_to_seconds(0.0)
         self.spin_offset.setValue(0.0)
-        if hasattr(self.overlay, 'video_cap') and self.overlay.video_cap:
-            try:
-                import cv2
-                self.overlay.video_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            except Exception:
-                pass
+        self.slider_scrub.blockSignals(True)
+        self.slider_scrub.setValue(0)
+        self.slider_scrub.blockSignals(False)
+        self._update_time_label()
+        if self.parent() and hasattr(self.parent(), 'update'):
+            self.parent().update()
+
+    def _seek_relative(self, delta_sec: float):
+        cur_t = self.overlay.get_current_time()
+        new_t = max(0.0, cur_t + delta_sec)
+        self.overlay.seek_to_seconds(new_t)
+        self.spin_offset.setValue(self.overlay.start_offset)
+        self.slider_scrub.blockSignals(True)
+        self.slider_scrub.setValue(getattr(self.overlay, 'video_cached_idx', 0))
+        self.slider_scrub.blockSignals(False)
+        self._update_time_label()
+        if self.parent() and hasattr(self.parent(), 'update'):
+            self.parent().update()
+
+    def _step_frame(self, delta: int):
+        self.overlay.step_frames(delta)
+        self.spin_offset.setValue(self.overlay.start_offset)
+        self.slider_scrub.blockSignals(True)
+        self.slider_scrub.setValue(getattr(self.overlay, 'video_cached_idx', 0))
+        self.slider_scrub.blockSignals(False)
+        self._update_time_label()
+        if self.parent() and hasattr(self.parent(), 'update'):
+            self.parent().update()
+
+    def _on_scrubber_changed(self, frame_idx: int):
+        self.overlay.seek_to_frame(frame_idx)
+        self.spin_offset.setValue(self.overlay.start_offset)
+        self._update_time_label()
         if self.parent() and hasattr(self.parent(), 'update'):
             self.parent().update()
 
@@ -1014,7 +1138,11 @@ class VideoOverlaySettingsDialog(QDialog):
             self.parent().update()
 
     def _on_offset_changed(self, val):
-        self.overlay.start_offset = float(val)
+        self.overlay.seek_to_seconds(float(val))
+        self.slider_scrub.blockSignals(True)
+        self.slider_scrub.setValue(getattr(self.overlay, 'video_cached_idx', 0))
+        self.slider_scrub.blockSignals(False)
+        self._update_time_label()
         if self.parent() and hasattr(self.parent(), 'update'):
             self.parent().update()
 

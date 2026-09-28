@@ -256,6 +256,94 @@ class OverlayObject:
             else:
                 self.video_cap = None
 
+    def get_duration(self) -> float:
+        if self.obj_type == self.TYPE_VIDEO:
+            return self.video_total_frames / max(1.0, self.video_fps)
+        elif self.obj_type == self.TYPE_GIF:
+            return getattr(self, 'gif_total_dur', 1.0)
+        return 0.0
+
+    def get_current_time(self, elapsed_sec: float = 0.0) -> float:
+        if self.obj_type != self.TYPE_VIDEO or self.video_total_frames <= 0:
+            return 0.0
+        dur = self.get_duration()
+        spd = max(0.1, getattr(self, 'playback_speed', 1.0))
+        offset = getattr(self, 'start_offset', 0.0)
+
+        if getattr(self, 'sync_with_timeline', True):
+            if getattr(self, 'is_playing', True):
+                v_time = max(0.0, (float(elapsed_sec) - self.start_time) * spd + offset)
+            else:
+                v_time = max(0.0, (float(elapsed_sec) - self.start_time) + offset)
+        else:
+            if getattr(self, 'is_playing', True):
+                now = time.perf_counter()
+                v_time = max(0.0, (now - getattr(self, 'internal_clock', now)) * spd + offset)
+            else:
+                v_time = max(0.0, offset)
+
+        if getattr(self, 'loop', True) and dur > 0:
+            v_time = v_time % dur
+        else:
+            v_time = min(dur, v_time)
+        return v_time
+
+    def seek_to_seconds(self, sec: float):
+        if self.obj_type != self.TYPE_VIDEO or self.video_cap is None or self.video_total_frames <= 0:
+            return
+        dur = self.get_duration()
+        if getattr(self, 'loop', True) and dur > 0:
+            sec = sec % dur
+        else:
+            sec = max(0.0, min(dur, sec))
+        self.start_offset = sec
+        self.internal_clock = time.perf_counter()
+        target_f = max(0, min(self.video_total_frames - 1, int(round(sec * self.video_fps))))
+        self._load_and_cache_frame(target_f)
+
+    def seek_to_frame(self, frame_idx: int):
+        if self.obj_type != self.TYPE_VIDEO or self.video_cap is None or self.video_total_frames <= 0:
+            return
+        target_f = max(0, min(self.video_total_frames - 1, frame_idx))
+        self.start_offset = target_f / max(1.0, self.video_fps)
+        self.internal_clock = time.perf_counter()
+        self._load_and_cache_frame(target_f)
+
+    def step_frames(self, delta: int):
+        cur_f = getattr(self, 'video_cached_idx', 0)
+        self.seek_to_frame(cur_f + delta)
+
+    def _load_and_cache_frame(self, target_f: int):
+        if self.video_cap is None or not self.video_cap.isOpened():
+            return None
+        if target_f in self.video_cache:
+            self.video_cached_frame = self.video_cache[target_f]
+            self.video_cached_idx = target_f
+            return self.video_cached_frame
+
+        if target_f == self.video_last_idx + 1:
+            ret, frame = self.video_cap.read()
+        else:
+            self.video_cap.set(cv2.CAP_PROP_POS_FRAMES, target_f)
+            ret, frame = self.video_cap.read()
+
+        if ret and frame is not None:
+            self.video_last_idx = target_f
+            h, w, ch = frame.shape
+            qimg = QImage(frame.data, w, h, ch * w, QImage.Format_BGR888).copy()
+            self.video_cached_frame = qimg
+            self.video_cached_idx = target_f
+            if len(self.video_cache) >= self.MAX_VIDEO_CACHE:
+                self.video_cache.popitem(last=False)
+            self.video_cache[target_f] = qimg
+            return qimg
+
+        if self.video_cached_frame is not None:
+            return self.video_cached_frame
+        if self.video_cache:
+            return next(reversed(self.video_cache.values()))
+        return None
+
     def get_frame_at_time(self, elapsed_sec: float) -> QImage:
         rel_time = max(0.0, float(elapsed_sec) - self.start_time)
         if self.obj_type == self.TYPE_TEXT:
@@ -299,50 +387,31 @@ class OverlayObject:
             if self.video_cap is None or not self.video_cap.isOpened() or self.video_total_frames <= 0:
                 return None
 
-            if not getattr(self, 'is_playing', True):
-                if self.video_cached_frame is not None:
-                    return self.video_cached_frame
-
+            dur = self.get_duration()
             spd = max(0.1, getattr(self, 'playback_speed', 1.0))
             offset = getattr(self, 'start_offset', 0.0)
 
             if getattr(self, 'sync_with_timeline', True):
-                v_time = max(0.0, (float(elapsed_sec) - self.start_time) * spd + offset)
+                if getattr(self, 'is_playing', True):
+                    v_time = max(0.0, (float(elapsed_sec) - self.start_time) * spd + offset)
+                else:
+                    v_time = max(0.0, (float(elapsed_sec) - self.start_time) + offset)
             else:
-                now = time.perf_counter()
-                v_time = max(0.0, (now - getattr(self, 'internal_clock', now)) * spd + offset)
+                if getattr(self, 'is_playing', True):
+                    now = time.perf_counter()
+                    v_time = max(0.0, (now - getattr(self, 'internal_clock', now)) * spd + offset)
+                else:
+                    v_time = max(0.0, offset)
 
             if getattr(self, 'loop', True) and self.video_total_frames > 0:
                 target_f = int(v_time * self.video_fps) % self.video_total_frames
             else:
                 target_f = min(self.video_total_frames - 1, max(0, int(v_time * self.video_fps)))
-            if target_f in self.video_cache:
-                self.video_cache.move_to_end(target_f)
-                return self.video_cache[target_f]
 
             if target_f == self.video_cached_idx and self.video_cached_frame is not None:
                 return self.video_cached_frame
 
-            if target_f == self.video_last_idx + 1:
-                ret, frame = self.video_cap.read()
-            else:
-                self.video_cap.set(cv2.CAP_PROP_POS_FRAMES, target_f)
-                ret, frame = self.video_cap.read()
-
-            if ret and frame is not None:
-                self.video_last_idx = target_f
-                h, w, ch = frame.shape
-                qimg = QImage(frame.data, w, h, ch * w, QImage.Format_BGR888).copy()
-                self.video_cached_frame = qimg
-                self.video_cached_idx = target_f
-                if len(self.video_cache) >= self.MAX_VIDEO_CACHE:
-                    self.video_cache.popitem(last=False)
-                self.video_cache[target_f] = qimg
-                return qimg
-
-            if self.video_cache:
-                return next(reversed(self.video_cache.values()))
-            return self.video_cached_frame
+            return self._load_and_cache_frame(target_f)
         return None
 
     def close(self):
@@ -748,9 +817,15 @@ class VideoCanvas(QWidget):
         act_vid_settings = None
         act_vid_play = None
         act_vid_loop = None
+        act_vid_rewind = None
+        act_vid_fwd = None
+        act_vid_restart = None
         if ov.obj_type == OverlayObject.TYPE_VIDEO:
             act_vid_settings = menu.addAction("⚙️ Video Playback Settings...")
             act_vid_play = menu.addAction("❚❚ Pause Video" if getattr(ov, 'is_playing', True) else "▶ Play Video")
+            act_vid_rewind = menu.addAction("⏪ Rewind 1s")
+            act_vid_fwd = menu.addAction("⏩ Forward 1s")
+            act_vid_restart = menu.addAction("⏮ Restart from 0s")
             act_vid_loop = menu.addAction("Disable Loop" if getattr(ov, 'loop', True) else "Enable Loop")
             menu.addSeparator()
 
@@ -771,6 +846,15 @@ class VideoCanvas(QWidget):
             self.update()
         elif chosen == act_vid_play:
             ov.is_playing = not getattr(ov, 'is_playing', True)
+            self.update()
+        elif chosen == act_vid_rewind:
+            ov.step_frames(-int(round(getattr(ov, 'video_fps', 25.0))))
+            self.update()
+        elif chosen == act_vid_fwd:
+            ov.step_frames(int(round(getattr(ov, 'video_fps', 25.0))))
+            self.update()
+        elif chosen == act_vid_restart:
+            ov.seek_to_frame(0)
             self.update()
         elif chosen == act_vid_loop:
             ov.loop = not getattr(ov, 'loop', True)
@@ -1444,6 +1528,12 @@ class ExportVideoWorker(QThread):
         self._is_cancelled = True
 
     def run(self):
+        try:
+            self._do_run()
+        except Exception as e:
+            self.finished.emit(False, f"Export error: {e}")
+
+    def _do_run(self):
         if not self.events or self.total_duration <= 0.05:
             self.finished.emit(False, "Recording is empty or duration is too short.")
             return
@@ -1473,6 +1563,7 @@ class ExportVideoWorker(QThread):
         container = None
         stream = None
         cv_writer = None
+        active_overlays = collections.OrderedDict()
 
         codec_name = self.codec.lower()
         if codec_name in ('x264', 'libx264', 'h264'):
@@ -1492,9 +1583,17 @@ class ExportVideoWorker(QThread):
             stream.width = out_w
             stream.height = out_h
             stream.pix_fmt = 'yuv420p'
-            if pyav_codec in ('h264', 'hevc'):
+            if pyav_codec == 'h264':
                 stream.options = {'crf': '20', 'preset': 'veryfast'}
-            elif self.bitrate:
+            elif pyav_codec == 'hevc':
+                stream.options = {'crf': '23', 'preset': 'veryfast'}
+            elif pyav_codec == 'vp9':
+                stream.options = {'crf': '28', 'b': '0'}
+            elif pyav_codec == 'prores':
+                stream.options = {'profile': '3'}
+                stream.pix_fmt = 'yuv422p10le'
+
+            if self.bitrate and pyav_codec not in ('vp9', 'prores'):
                 try:
                     b_val = int(str(self.bitrate).upper().replace('M', '000000').replace('K', '000'))
                     stream.bit_rate = b_val
@@ -1507,6 +1606,7 @@ class ExportVideoWorker(QThread):
                     container.close()
                 except Exception:
                     pass
+                container = None
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             cv_writer = cv2.VideoWriter(self.output_path, fourcc, self.fps, (out_w, out_h))
             if not cv_writer.isOpened():
@@ -1634,36 +1734,67 @@ class ExportVideoWorker(QThread):
             painter.restore()
             painter.end()
 
-            ptr = render_img.bits()
-            ptr.setsize(out_h * out_w * 4)
-            arr = np.frombuffer(ptr, np.uint8).reshape((out_h, out_w, 4))
-            bgr_out = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
+            bpl = render_img.bytesPerLine()
+            ptr = render_img.constBits()
+            ptr.setsize(bpl * out_h)
+            raw = np.frombuffer(ptr, np.uint8).reshape((out_h, bpl))
+            rgba = raw[:, :out_w * 4].reshape((out_h, out_w, 4))
+            bgr_out = cv2.cvtColor(rgba, cv2.COLOR_BGRA2BGR)
 
-            if use_pyav:
-                av_frame = av.VideoFrame.from_ndarray(bgr_out, format='bgr24')
-                for packet in stream.encode(av_frame):
-                    container.mux(packet)
-            else:
+            if use_pyav and container is not None and stream is not None:
+                try:
+                    av_frame = av.VideoFrame.from_ndarray(bgr_out, format='bgr24')
+                    for packet in stream.encode(av_frame):
+                        container.mux(packet)
+                except Exception:
+                    use_pyav = False
+                    if container:
+                        try:
+                            container.close()
+                        except Exception:
+                            pass
+                        container = None
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    cv_writer = cv2.VideoWriter(self.output_path, fourcc, self.fps, (out_w, out_h))
+                    if cv_writer.isOpened():
+                        cv_writer.write(bgr_out)
+            elif cv_writer is not None:
                 cv_writer.write(bgr_out)
 
             if frame_num % 10 == 0 or frame_num == total_frames - 1:
                 self.progress.emit(frame_num + 1, total_frames, f"Exporting: {frame_num + 1}/{total_frames} frames")
 
         for ov in active_overlays.values():
-            ov.close()
+            try:
+                ov.close()
+            except Exception:
+                pass
         active_overlays.clear()
 
         if cap:
-            cap.release()
+            try:
+                cap.release()
+            except Exception:
+                pass
 
-        if use_pyav:
+        if use_pyav and container is not None and stream is not None:
             if not self._is_cancelled:
-                for packet in stream.encode(None):
-                    container.mux(packet)
-            container.close()
-        else:
-            if cv_writer:
+                try:
+                    for packet in stream.encode(None):
+                        container.mux(packet)
+                except Exception:
+                    pass
+            try:
+                container.close()
+            except Exception:
+                pass
+            container = None
+        elif cv_writer is not None:
+            try:
                 cv_writer.release()
+            except Exception:
+                pass
+            cv_writer = None
 
         # Audio commentary muxing via ffmpeg
         if not self._is_cancelled and self.audio_path and os.path.exists(self.audio_path) and os.path.getsize(self.audio_path) > 100:
@@ -1681,7 +1812,8 @@ class ExportVideoWorker(QThread):
                     "-shortest",
                     temp_mux
                 ]
-                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                flags = 0x08000000 if os.name == 'nt' else 0
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags)
                 if res.returncode == 0 and os.path.exists(temp_mux) and os.path.getsize(temp_mux) > 1000:
                     try:
                         os.replace(temp_mux, self.output_path)

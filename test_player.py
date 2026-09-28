@@ -922,6 +922,64 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         self.assertIsNotNone(dlg)
         print("[OK] Telegram @furrykit and GitHub furrykit links verified in About dialog")
 
+    def test_36_custom_export_preset(self):
+        """Verify Custom export preset auto-selection and config output"""
+        dlg = ExportDialog(default_w=1920, default_h=1080, parent=self.player)
+        self.assertIn("Custom (User Defined)", dlg.presets)
+
+        # Modifying width should auto-select "Custom (User Defined)"
+        dlg.spin_w.setValue(1440)
+        self.assertEqual(dlg.combo_presets.currentText(), "Custom (User Defined)")
+
+        # Changing FPS should retain Custom selection
+        dlg.spin_fps.setValue(45)
+        self.assertEqual(dlg.combo_presets.currentText(), "Custom (User Defined)")
+
+        cfg = dlg.get_export_config()
+        self.assertEqual(cfg['width'], 1440)
+        self.assertEqual(cfg['fps'], 45.0)
+        dlg.close()
+        print("[OK] Custom export preset selection and dynamic parameter switching verified")
+
+    def test_37_video_overlay_seeking(self):
+        """Verify video overlay seeking (seconds, frame, relative stepping) and freeze bug fix"""
+        vid_path = self.video_path
+        ov = OverlayObject(999, vid_path, QRectF(0, 0, 320, 240), start_time=0.0)
+        self.assertEqual(ov.obj_type, OverlayObject.TYPE_VIDEO)
+        self.assertTrue(ov.video_total_frames > 0)
+
+        dur = ov.get_duration()
+        self.assertGreater(dur, 0.0)
+
+        # Test seeking to seconds
+        ov.seek_to_seconds(0.5)
+        self.assertAlmostEqual(ov.start_offset, 0.5, delta=0.1)
+        self.assertIsNotNone(ov.video_cached_frame)
+
+        # Test frame seeking
+        ov.seek_to_frame(10)
+        self.assertEqual(ov.video_cached_idx, 10)
+        f10_img = ov.video_cached_frame
+        self.assertIsNotNone(f10_img)
+
+        # Test step frames
+        ov.step_frames(5)
+        self.assertEqual(ov.video_cached_idx, 15)
+        f15_img = ov.video_cached_frame
+        self.assertIsNotNone(f15_img)
+
+        # Verify frame update when paused (freeze bug check)
+        ov.is_playing = False
+        frame_at_t = ov.get_frame_at_time(0.0)
+        self.assertIsNotNone(frame_at_t)
+
+        # Step back
+        ov.step_frames(-5)
+        self.assertEqual(ov.video_cached_idx, 10)
+
+        ov.close()
+        print("[OK] Video overlay seeking, scrubbing, stepping, and paused frame rendering verified")
+
 
 if __name__ == "__main__":
     unittest.main()
