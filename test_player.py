@@ -16,7 +16,7 @@
 import os
 import sys
 import unittest
-from PyQt5.QtCore import Qt, QPointF, QPoint
+from PyQt5.QtCore import Qt, QPointF, QPoint, QRectF
 from PyQt5.QtGui import QColor, QMouseEvent
 from PyQt5.QtWidgets import QApplication
 
@@ -24,7 +24,7 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 from player import (
     VideoPlayerWindow, VideoCanvas, Stroke, dist_to_segment_sq,
-    ActionRecorder, ExportVideoWorker
+    ActionRecorder, ExportVideoWorker, OverlayObject
 )
 
 
@@ -450,6 +450,71 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
             os.remove(out_mp4)
 
         print(f"[OK] Экспорт видео MP4 ({out_w}x{out_h}, {out_frames} кадров) выполнен успешно")
+
+    def test_18_overlay_object_and_export(self):
+        """Проверка добавления поверх видео объектов (картинки, PIP второго видео), их трансформации и рендера"""
+        canvas = self.player.canvas
+        rec = self.player.recorder
+        self.assertEqual(len(canvas.overlays), 0)
+
+        self.player.start_actions_record()
+
+        img_path = os.path.abspath("icon.png")
+        self.assertTrue(os.path.exists(img_path))
+        ov_img = OverlayObject(1, img_path, QRectF(20, 20, 100, 100), start_time=0.0)
+        self.assertEqual(ov_img.obj_type, OverlayObject.TYPE_IMAGE)
+        self.assertIsNotNone(ov_img.get_frame_at_time(0.0))
+        canvas.overlays.append(ov_img)
+        rec.record_overlay_add(ov_img)
+
+        ov_vid = OverlayObject(2, self.video_path, QRectF(150, 20, 120, 80), start_time=0.1)
+        self.assertEqual(ov_vid.obj_type, OverlayObject.TYPE_VIDEO)
+        self.assertIsNotNone(ov_vid.get_frame_at_time(0.2))
+        canvas.overlays.append(ov_vid)
+        rec.record_overlay_add(ov_vid)
+
+        ov_img.rect.moveTo(40, 50)
+        rec.record_overlay_transform(ov_img)
+
+        self.player.canvas.repaint()
+
+        rec.stop()
+        events = list(rec.events)
+        types = [e['type'] for e in events]
+        self.assertIn('overlay_add', types)
+        self.assertIn('overlay_transform', types)
+
+        out_mp4 = os.path.abspath("test_overlay_export.mp4")
+        if os.path.exists(out_mp4):
+            os.remove(out_mp4)
+
+        worker = ExportVideoWorker(
+            video_path=self.video_path,
+            events=events,
+            total_duration=rec.elapsed_time if rec.elapsed_time > 0.1 else 0.5,
+            output_path=out_mp4,
+            fps=30.0
+        )
+        worker.run()
+
+        self.assertTrue(os.path.exists(out_mp4), "Экспортированное видео с оверлеями должно существовать")
+        self.assertGreater(os.path.getsize(out_mp4), 1000)
+
+        import cv2
+        cap_check = cv2.VideoCapture(out_mp4)
+        self.assertTrue(cap_check.isOpened())
+        f_count = int(cap_check.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap_check.release()
+        self.assertGreater(f_count, 0)
+
+        if os.path.exists(out_mp4):
+            os.remove(out_mp4)
+
+        for ov in canvas.overlays:
+            ov.close()
+        canvas.overlays.clear()
+
+        print("[OK] Добавление объектов (картинка, второе видео PIP), перемещение и экспорт работают безупречно")
 
 
 if __name__ == "__main__":

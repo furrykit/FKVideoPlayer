@@ -8,6 +8,7 @@ import time
 import av
 import cv2
 import numpy as np
+from PIL import Image, ImageSequence
 from PyQt5.QtCore import Qt, QTimer, QPointF, QRectF, pyqtSignal, QPoint, QUrl, QThread
 from PyQt5.QtGui import (
     QImage, QPixmap, QPainter, QPen, QColor, QBrush, QCursor,
@@ -116,6 +117,120 @@ class Stroke:
         self.points.append(p)
 
 
+class OverlayObject:
+    TYPE_IMAGE = "image"
+    TYPE_GIF = "gif"
+    TYPE_VIDEO = "video"
+
+    def __init__(self, obj_id: int, file_path: str, rect: QRectF, start_time: float = 0.0):
+        self.obj_id = obj_id
+        self.file_path = file_path
+        self.rect = QRectF(rect)
+        self.start_time = float(start_time)
+        self.obj_type = self._detect_type(file_path)
+
+        self.static_image = None
+        self.gif_frames = []
+        self.gif_durations = []
+        self.gif_total_dur = 0.0
+        self.video_cap = None
+        self.video_fps = 25.0
+        self.video_total_frames = 0
+        self.video_cached_frame = None
+        self.video_cached_idx = -1
+
+        self._load_media()
+
+    def _detect_type(self, path: str) -> str:
+        ext = os.path.splitext(path)[1].lower()
+        if ext == '.gif':
+            return self.TYPE_GIF
+        elif ext in ('.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.m4v'):
+            return self.TYPE_VIDEO
+        return self.TYPE_IMAGE
+
+    def _load_media(self):
+        if not self.file_path or not os.path.exists(self.file_path):
+            return
+        if self.obj_type == self.TYPE_IMAGE:
+            img = QImage(self.file_path)
+            if not img.isNull():
+                self.static_image = img
+            else:
+                try:
+                    im = Image.open(self.file_path).convert('RGBA')
+                    data = im.tobytes('raw', 'RGBA')
+                    self.static_image = QImage(data, im.width, im.height, QImage.Format_RGBA8888).copy()
+                except Exception:
+                    pass
+        elif self.obj_type == self.TYPE_GIF:
+            try:
+                im = Image.open(self.file_path)
+                for frame in ImageSequence.Iterator(im):
+                    dur_ms = frame.info.get('duration', 100)
+                    if dur_ms <= 0:
+                        dur_ms = 100
+                    self.gif_durations.append(dur_ms / 1000.0)
+                    rgba = frame.convert('RGBA')
+                    data = rgba.tobytes('raw', 'RGBA')
+                    qimg = QImage(data, rgba.width, rgba.height, QImage.Format_RGBA8888).copy()
+                    self.gif_frames.append(qimg)
+                self.gif_total_dur = sum(self.gif_durations) if self.gif_durations else 1.0
+            except Exception:
+                self.obj_type = self.TYPE_IMAGE
+                self.static_image = QImage(self.file_path)
+        elif self.obj_type == self.TYPE_VIDEO:
+            self.video_cap = cv2.VideoCapture(self.file_path)
+            if self.video_cap.isOpened():
+                self.video_fps = float(self.video_cap.get(cv2.CAP_PROP_FPS))
+                if self.video_fps <= 0 or np.isnan(self.video_fps):
+                    self.video_fps = 25.0
+                self.video_total_frames = int(self.video_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            else:
+                self.video_cap = None
+
+    def get_frame_at_time(self, elapsed_sec: float) -> QImage:
+        rel_time = max(0.0, float(elapsed_sec) - self.start_time)
+        if self.obj_type == self.TYPE_IMAGE:
+            return self.static_image
+        elif self.obj_type == self.TYPE_GIF:
+            if not self.gif_frames:
+                return self.static_image
+            if self.gif_total_dur <= 0:
+                return self.gif_frames[0]
+            cycle_time = rel_time % self.gif_total_dur
+            acc = 0.0
+            for i, dur in enumerate(self.gif_durations):
+                acc += dur
+                if cycle_time <= acc:
+                    return self.gif_frames[i]
+            return self.gif_frames[-1]
+        elif self.obj_type == self.TYPE_VIDEO:
+            if self.video_cap is None or not self.video_cap.isOpened() or self.video_total_frames <= 0:
+                return None
+            target_f = int(rel_time * self.video_fps) % self.video_total_frames
+            if target_f == self.video_cached_idx and self.video_cached_frame is not None:
+                return self.video_cached_frame
+            self.video_cap.set(cv2.CAP_PROP_POS_FRAMES, target_f)
+            ret, frame = self.video_cap.read()
+            if ret and frame is not None:
+                h, w, ch = frame.shape
+                qimg = QImage(frame.data, w, h, ch * w, QImage.Format_BGR888).copy()
+                self.video_cached_frame = qimg
+                self.video_cached_idx = target_f
+                return qimg
+            return self.video_cached_frame
+        return None
+
+    def close(self):
+        if self.video_cap is not None:
+            try:
+                self.video_cap.release()
+            except Exception:
+                pass
+            self.video_cap = None
+
+
 class VideoCanvas(QWidget):
     zoom_changed = pyqtSignal(float)
     drawing_changed = pyqtSignal()
@@ -123,6 +238,7 @@ class VideoCanvas(QWidget):
     TOOL_PEN = 0
     TOOL_ERASER = 1
     TOOL_PAN = 2
+    TOOL_SELECT = 3
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -148,6 +264,12 @@ class VideoCanvas(QWidget):
         self.current_stroke = None
         self.undo_stack = []
         self.recorder = None
+
+        self.overlays = []
+        self.selected_overlay = None
+        self._overlay_drag_mode = None
+        self._drag_start_vpt = None
+        self._drag_start_rect = None
 
         self.update_cursor()
 
@@ -204,11 +326,31 @@ class VideoCanvas(QWidget):
             self.setCursor(self._create_eraser_cursor())
         elif self.active_tool == self.TOOL_PAN:
             self.setCursor(Qt.OpenHandCursor)
+        elif self.active_tool == self.TOOL_SELECT:
+            self.setCursor(Qt.ArrowCursor)
 
     def set_tool(self, tool_code):
         self.active_tool = tool_code
         self.update_cursor()
         self.update()
+
+    def remove_overlay(self, ov):
+        if ov in self.overlays:
+            self.overlays.remove(ov)
+            if self.recorder:
+                self.recorder.record_overlay_remove(ov.obj_id)
+            ov.close()
+            if self.selected_overlay == ov:
+                self.selected_overlay = None
+            self.update()
+
+    def _get_current_time(self) -> float:
+        if self.recorder and self.recorder.is_active():
+            return self.recorder.current_time()
+        p = self.parent()
+        if p and hasattr(p, 'current_frame_idx') and hasattr(p, 'fps') and p.fps > 0:
+            return p.current_frame_idx / p.fps
+        return 0.0
 
     def set_pen_color(self, color):
         self.pen_color = QColor(color)
@@ -419,6 +561,38 @@ class VideoCanvas(QWidget):
             elif self.active_tool == self.TOOL_ERASER:
                 vpt = self.screen_to_video(pos)
                 self.erase_strokes_at_video_pt(vpt)
+            elif self.active_tool == self.TOOL_SELECT:
+                vpt = self.screen_to_video(pos)
+                if self.selected_overlay:
+                    btn_r = 12.0 / self.zoom_factor
+                    top_right = QPointF(self.selected_overlay.rect.right(), self.selected_overlay.rect.top())
+                    d_del = (vpt.x() - top_right.x()) ** 2 + (vpt.y() - top_right.y()) ** 2
+                    if d_del <= btn_r * btn_r:
+                        self.remove_overlay(self.selected_overlay)
+                        return
+
+                    handle_size = 18.0 / self.zoom_factor
+                    hr = QRectF(self.selected_overlay.rect.right() - handle_size,
+                                self.selected_overlay.rect.bottom() - handle_size,
+                                handle_size * 1.5, handle_size * 1.5)
+                    if hr.contains(vpt):
+                        self._overlay_drag_mode = 'resize'
+                        self._drag_start_vpt = vpt
+                        self._drag_start_rect = QRectF(self.selected_overlay.rect)
+                        return
+
+                hit_ov = None
+                for ov in reversed(self.overlays):
+                    if ov.rect.contains(vpt):
+                        hit_ov = ov
+                        break
+
+                self.selected_overlay = hit_ov
+                if hit_ov:
+                    self._overlay_drag_mode = 'move'
+                    self._drag_start_vpt = vpt
+                    self._drag_start_rect = QRectF(hit_ov.rect)
+                self.update()
 
     def mouseMoveEvent(self, event):
         pos = QPointF(event.pos())
@@ -440,6 +614,20 @@ class VideoCanvas(QWidget):
             elif self.active_tool == self.TOOL_ERASER:
                 vpt = self.screen_to_video(pos)
                 self.erase_strokes_at_video_pt(vpt)
+            elif self.active_tool == self.TOOL_SELECT and self.selected_overlay and self._overlay_drag_mode:
+                vpt = self.screen_to_video(pos)
+                dx = vpt.x() - self._drag_start_vpt.x()
+                dy = vpt.y() - self._drag_start_vpt.y()
+                if self._overlay_drag_mode == 'move':
+                    new_x = self._drag_start_rect.x() + dx
+                    new_y = self._drag_start_rect.y() + dy
+                    self.selected_overlay.rect.moveTo(new_x, new_y)
+                elif self._overlay_drag_mode == 'resize':
+                    new_w = max(20.0, self._drag_start_rect.width() + dx)
+                    new_h = max(20.0, self._drag_start_rect.height() + dy)
+                    self.selected_overlay.rect.setWidth(new_w)
+                    self.selected_overlay.rect.setHeight(new_h)
+                self.update()
 
     def mouseReleaseEvent(self, event):
         if event.button() in (Qt.RightButton, Qt.MidButton) or (
@@ -452,6 +640,13 @@ class VideoCanvas(QWidget):
             if self.current_stroke and self.recorder:
                 self.recorder.record_stroke_end(self.current_stroke.stroke_id)
             self.current_stroke = None
+
+            if self.active_tool == self.TOOL_SELECT and self.selected_overlay and self._overlay_drag_mode:
+                if self.recorder:
+                    self.recorder.record_overlay_transform(self.selected_overlay)
+                self._overlay_drag_mode = None
+                self._drag_start_vpt = None
+                self._drag_start_rect = None
 
     def wheelEvent(self, event):
         num_degrees = event.angleDelta().y() / 8.0
@@ -480,6 +675,38 @@ class VideoCanvas(QWidget):
             painter.drawImage(0, 0, self.current_qimage)
             painter.setPen(QPen(QColor(60, 60, 75, 180), 1.0 / self.zoom_factor))
             painter.drawRect(0, 0, self.video_width, self.video_height)
+
+            cur_time = self._get_current_time()
+            for ov in self.overlays:
+                ov_img = ov.get_frame_at_time(cur_time)
+                if ov_img and not ov_img.isNull():
+                    painter.drawImage(ov.rect, ov_img)
+
+                if ov == self.selected_overlay and self.active_tool == self.TOOL_SELECT:
+                    painter.save()
+                    sel_pen = QPen(QColor("#00E5FF"), 1.8 / self.zoom_factor, Qt.DashLine)
+                    painter.setPen(sel_pen)
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawRect(ov.rect)
+
+                    handle_size = 14.0 / self.zoom_factor
+                    hr = QRectF(ov.rect.right() - handle_size, ov.rect.bottom() - handle_size, handle_size, handle_size)
+                    painter.setPen(QPen(QColor("#007AFF"), 1.0 / self.zoom_factor))
+                    painter.setBrush(QBrush(QColor("#00E5FF")))
+                    painter.drawRect(hr)
+
+                    btn_r = 9.0 / self.zoom_factor
+                    btn_center = QPointF(ov.rect.right(), ov.rect.top())
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(QBrush(QColor("#FF3B30")))
+                    painter.drawEllipse(btn_center, btn_r, btn_r)
+                    painter.setPen(QPen(QColor("#FFFFFF"), 1.5 / self.zoom_factor))
+                    del_d = 4.0 / self.zoom_factor
+                    painter.drawLine(QPointF(btn_center.x() - del_d, btn_center.y() - del_d),
+                                     QPointF(btn_center.x() + del_d, btn_center.y() + del_d))
+                    painter.drawLine(QPointF(btn_center.x() + del_d, btn_center.y() - del_d),
+                                     QPointF(btn_center.x() - del_d, btn_center.y() + del_d))
+                    painter.restore()
 
             for stroke in self.strokes:
                 if not stroke.points:
@@ -577,6 +804,17 @@ class ActionRecorder:
                         'time': 0.0,
                         'stroke_id': sid
                     })
+
+        if hasattr(self.player, 'canvas') and self.player.canvas.overlays:
+            for ov in self.player.canvas.overlays:
+                self.events.append({
+                    'type': 'overlay_add',
+                    'time': 0.0,
+                    'obj_id': ov.obj_id,
+                    'file_path': ov.file_path,
+                    'rect': [round(ov.rect.x(), 2), round(ov.rect.y(), 2),
+                             round(ov.rect.width(), 2), round(ov.rect.height(), 2)]
+                })
 
     def pause(self):
         if self.state == self.STATE_RECORDING:
@@ -676,6 +914,38 @@ class ActionRecorder:
             'stroke_ids': list(stroke_ids)
         })
 
+    def record_overlay_add(self, overlay):
+        if self.state != self.STATE_RECORDING:
+            return
+        self.events.append({
+            'type': 'overlay_add',
+            'time': self.current_time(),
+            'obj_id': overlay.obj_id,
+            'file_path': overlay.file_path,
+            'rect': [round(overlay.rect.x(), 2), round(overlay.rect.y(), 2),
+                     round(overlay.rect.width(), 2), round(overlay.rect.height(), 2)]
+        })
+
+    def record_overlay_transform(self, overlay):
+        if self.state != self.STATE_RECORDING:
+            return
+        self.events.append({
+            'type': 'overlay_transform',
+            'time': self.current_time(),
+            'obj_id': overlay.obj_id,
+            'rect': [round(overlay.rect.x(), 2), round(overlay.rect.y(), 2),
+                     round(overlay.rect.width(), 2), round(overlay.rect.height(), 2)]
+        })
+
+    def record_overlay_remove(self, obj_id: int):
+        if self.state != self.STATE_RECORDING:
+            return
+        self.events.append({
+            'type': 'overlay_remove',
+            'time': self.current_time(),
+            'obj_id': obj_id
+        })
+
     def to_dict(self) -> dict:
         return {
             'video_path': getattr(self.player, 'video_path', ''),
@@ -769,6 +1039,7 @@ class ExportVideoWorker(QThread):
         total_events = len(self.events)
 
         active_strokes = collections.OrderedDict()
+        active_overlays = collections.OrderedDict()
         current_frame_idx = 0
         cached_bgr_frame = None
         cached_frame_idx = -1
@@ -812,6 +1083,20 @@ class ExportVideoWorker(QThread):
                 elif etype == 'erase':
                     for sid in ev.get('stroke_ids', []):
                         active_strokes.pop(sid, None)
+                elif etype == 'overlay_add':
+                    oid = ev['obj_id']
+                    fpath = ev.get('file_path', '')
+                    r = QRectF(*ev['rect'])
+                    active_overlays[oid] = OverlayObject(oid, fpath, r, start_time=ev['time'])
+                elif etype == 'overlay_transform':
+                    oid = ev['obj_id']
+                    if oid in active_overlays:
+                        active_overlays[oid].rect = QRectF(*ev['rect'])
+                elif etype == 'overlay_remove':
+                    oid = ev['obj_id']
+                    ov = active_overlays.pop(oid, None)
+                    if ov:
+                        ov.close()
                 event_idx += 1
 
             if cap is not None:
@@ -840,6 +1125,11 @@ class ExportVideoWorker(QThread):
             sy = out_h / float(src_h)
             painter.save()
             painter.scale(sx, sy)
+
+            for ov in active_overlays.values():
+                ov_img = ov.get_frame_at_time(t)
+                if ov_img and not ov_img.isNull():
+                    painter.drawImage(ov.rect, ov_img)
 
             for s in active_strokes.values():
                 pts = s['points']
@@ -872,6 +1162,10 @@ class ExportVideoWorker(QThread):
 
             if frame_num % 10 == 0 or frame_num == total_frames - 1:
                 self.progress.emit(frame_num + 1, total_frames, f"Экспорт: {frame_num + 1}/{total_frames} кадров")
+
+        for ov in active_overlays.values():
+            ov.close()
+        active_overlays.clear()
 
         if cap:
             cap.release()
@@ -951,6 +1245,10 @@ class FKVideoPlayer(QMainWindow):
         self.rec_update_timer.timeout.connect(self._on_rec_update_timer)
         self.export_worker = None
 
+        self.overlay_anim_timer = QTimer(self)
+        self.overlay_anim_timer.timeout.connect(self._on_overlay_anim_tick)
+        self.overlay_anim_timer.start(33)
+
         self._init_ui()
         self._apply_dark_theme()
         self._setup_shortcuts()
@@ -1012,6 +1310,12 @@ class FKVideoPlayer(QMainWindow):
         self.btn_tool_pan.clicked.connect(lambda: self._select_tool(VideoCanvas.TOOL_PAN))
         layout.addWidget(self.btn_tool_pan)
 
+        self.btn_tool_select = QPushButton("🎯 Объект")
+        self.btn_tool_select.setToolTip("Выбор, перемещение и масштабирование объекта (V)")
+        self.btn_tool_select.setCheckable(True)
+        self.btn_tool_select.clicked.connect(lambda: self._select_tool(VideoCanvas.TOOL_SELECT))
+        layout.addWidget(self.btn_tool_select)
+
         self._add_separator(layout)
 
         self.preset_color_buttons = {}
@@ -1066,6 +1370,11 @@ class FKVideoPlayer(QMainWindow):
         self.btn_clear_all.setToolTip("Очистить холст (Delete / C)")
         self.btn_clear_all.clicked.connect(self.canvas.clear_all_drawings)
         layout.addWidget(self.btn_clear_all)
+
+        self.btn_add_overlay = QPushButton("🖼️ Добавить объект...")
+        self.btn_add_overlay.setToolTip("Добавить поверх видео картинку, GIF или второе видео (Ctrl+I)")
+        self.btn_add_overlay.clicked.connect(self.add_overlay_dialog)
+        layout.addWidget(self.btn_add_overlay)
 
         layout.addStretch(1)
 
@@ -1281,7 +1590,7 @@ class FKVideoPlayer(QMainWindow):
         QShortcut(QKeySequence(Qt.Key_Down), self, lambda: self.adjust_volume(-5))
 
         QShortcut(QKeySequence("Ctrl+Z"), self, self.canvas.undo_last_action)
-        QShortcut(QKeySequence(Qt.Key_Delete), self, self.canvas.clear_all_drawings)
+        QShortcut(QKeySequence(Qt.Key_Delete), self, self._on_delete_shortcut)
         QShortcut(QKeySequence("C"), self, self.canvas.clear_all_drawings)
 
         QShortcut(QKeySequence("["), self, lambda: self.spin_width.setValue(self.spin_width.value() - 1))
@@ -1301,11 +1610,74 @@ class FKVideoPlayer(QMainWindow):
         QShortcut(QKeySequence("P"), self, lambda: self._select_tool(VideoCanvas.TOOL_PEN))
         QShortcut(QKeySequence("E"), self, lambda: self._select_tool(VideoCanvas.TOOL_ERASER))
         QShortcut(QKeySequence("H"), self, lambda: self._select_tool(VideoCanvas.TOOL_PAN))
+        QShortcut(QKeySequence("V"), self, lambda: self._select_tool(VideoCanvas.TOOL_SELECT))
         QShortcut(QKeySequence("O"), self, self.open_file_dialog)
+        QShortcut(QKeySequence("Ctrl+I"), self, self.add_overlay_dialog)
 
         QShortcut(QKeySequence("Ctrl+R"), self, self._shortcut_toggle_record)
         QShortcut(QKeySequence("Ctrl+Shift+P"), self, self.pause_actions_record)
         QShortcut(QKeySequence("Ctrl+E"), self, self.export_recorded_video)
+
+    def _on_delete_shortcut(self):
+        if self.canvas.active_tool == VideoCanvas.TOOL_SELECT and self.canvas.selected_overlay:
+            self.canvas.remove_overlay(self.canvas.selected_overlay)
+        else:
+            self.canvas.clear_all_drawings()
+
+    def _on_overlay_anim_tick(self):
+        if not self.is_playing and self.canvas.overlays:
+            if any(ov.obj_type in (OverlayObject.TYPE_GIF, OverlayObject.TYPE_VIDEO) for ov in self.canvas.overlays):
+                self.canvas.update()
+
+    def add_overlay_dialog(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите изображение, GIF или видео",
+            "",
+            "Медиафайлы (*.png *.jpg *.jpeg *.bmp *.webp *.gif *.mp4 *.avi *.mov *.mkv *.webm);;Изображения (*.png *.jpg *.jpeg *.gif *.webp *.bmp);;Видео (*.mp4 *.avi *.mov *.mkv *.webm);;Все файлы (*.*)"
+        )
+        if not file_path:
+            return
+
+        vw = self.canvas.video_width if self.canvas.video_width > 0 else 1280
+        vh = self.canvas.video_height if self.canvas.video_height > 0 else 720
+
+        ow = max(120.0, vw * 0.28)
+        oh = ow * 0.5625
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in ('.png', '.jpg', '.jpeg', '.bmp', '.webp', '.gif'):
+            try:
+                im = Image.open(file_path)
+                if im.width > 0 and im.height > 0:
+                    oh = ow * (im.height / float(im.width))
+            except Exception:
+                pass
+        elif ext in ('.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.m4v'):
+            try:
+                temp_cap = cv2.VideoCapture(file_path)
+                if temp_cap.isOpened():
+                    cw = temp_cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+                    ch = temp_cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+                    if cw > 0 and ch > 0:
+                        oh = ow * (ch / float(cw))
+                temp_cap.release()
+            except Exception:
+                pass
+
+        ox = max(15.0, vw - ow - 25.0)
+        oy = 25.0
+
+        sid = self.recorder.allocate_stroke_id()
+        cur_t = self.recorder.current_time() if self.recorder.is_active() else 0.0
+        overlay = OverlayObject(sid, file_path, QRectF(ox, oy, ow, oh), start_time=cur_t)
+        self.canvas.overlays.append(overlay)
+        self.canvas.selected_overlay = overlay
+
+        if self.recorder.is_active():
+            self.recorder.record_overlay_add(overlay)
+
+        self._select_tool(VideoCanvas.TOOL_SELECT)
+        self.canvas.update()
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -1351,6 +1723,7 @@ class FKVideoPlayer(QMainWindow):
         self.btn_tool_pen.setChecked(tool_code == VideoCanvas.TOOL_PEN)
         self.btn_tool_eraser.setChecked(tool_code == VideoCanvas.TOOL_ERASER)
         self.btn_tool_pan.setChecked(tool_code == VideoCanvas.TOOL_PAN)
+        self.btn_tool_select.setChecked(tool_code == VideoCanvas.TOOL_SELECT)
         self.canvas.set_tool(tool_code)
 
     def _update_color_buttons_state(self, current_hex):
