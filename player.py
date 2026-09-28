@@ -62,6 +62,41 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 
+APP_VERSION = "1.0.0"
+
+
+def get_ffmpeg_path():
+    """Finds ffmpeg executable: bundled in PyInstaller MEIPASS, in app directory, in PATH, or system fallback."""
+    import shutil
+    candidates = []
+    # 1. Bundled in PyInstaller _MEIPASS
+    if hasattr(sys, '_MEIPASS'):
+        candidates.append(os.path.join(sys._MEIPASS, 'ffmpeg.exe'))
+        candidates.append(os.path.join(sys._MEIPASS, 'ffmpeg'))
+    # 2. Next to executable or current file
+    if getattr(sys, 'frozen', False):
+        app_dir = os.path.dirname(sys.executable)
+    else:
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates.append(os.path.join(app_dir, 'ffmpeg.exe'))
+    candidates.append(os.path.join(app_dir, 'ffmpeg'))
+    # 3. In PATH
+    which_path = shutil.which("ffmpeg")
+    if which_path:
+        candidates.append(which_path)
+    # 4. Standard Windows locations
+    candidates.extend([
+        r"C:\ffmpeg\ffmpeg.exe",
+        r"C:\ffmpeg\bin\ffmpeg.exe",
+        r"D:\ffmpeg\bin\ffmpeg.exe",
+        r"D:\ffmpeg\ffmpeg.exe",
+    ])
+    for cand in candidates:
+        if cand and os.path.exists(cand) and os.path.isfile(cand):
+            return os.path.abspath(cand)
+    return None
+
+
 def dist_to_segment_sq(p: QPointF, a: QPointF, b: QPointF) -> float:
     ab_x = b.x() - a.x()
     ab_y = b.y() - a.y()
@@ -2206,9 +2241,9 @@ class ExportVideoWorker(QThread):
 
         # Audio commentary muxing via ffmpeg
         if not self._is_cancelled and self.audio_path and os.path.exists(self.audio_path) and os.path.getsize(self.audio_path) > 100:
-            import subprocess, shutil
-            ffmpeg_exe = shutil.which("ffmpeg") or r"C:\ffmpeg\ffmpeg.EXE"
-            if os.path.exists(ffmpeg_exe):
+            import subprocess
+            ffmpeg_exe = get_ffmpeg_path()
+            if ffmpeg_exe and os.path.exists(ffmpeg_exe):
                 temp_mux = self.output_path + ".muxed" + os.path.splitext(self.output_path)[1]
                 cmd = [
                     ffmpeg_exe, "-y",
@@ -2413,6 +2448,8 @@ class FKVideoPlayer(QMainWindow):
 
         if initial_video_path and os.path.exists(initial_video_path):
             self.load_video(initial_video_path)
+
+        QTimer.singleShot(2500, self._check_updates_background)
 
     @property
     def active_project(self):
@@ -4033,20 +4070,23 @@ class FKVideoPlayer(QMainWindow):
         audio_target = None
         if cfg['include_audio']:
             if has_mic and has_sys:
-                import shutil, subprocess
-                ffmpeg_exe = shutil.which("ffmpeg") or r"C:\ffmpeg\ffmpeg.EXE"
-                mixed_wav = os.path.abspath(f"temp_mixed_{int(time.time())}.wav")
-                cmd = [
-                    ffmpeg_exe, "-y",
-                    "-i", self.last_sys_wav,
-                    "-i", self.last_mic_wav,
-                    "-filter_complex", "amix=inputs=2:duration=longest:dropout_transition=0",
-                    mixed_wav
-                ]
-                flags = 0x08000000 if os.name == 'nt' else 0
-                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags)
-                if res.returncode == 0 and os.path.exists(mixed_wav) and os.path.getsize(mixed_wav) > 100:
-                    audio_target = mixed_wav
+                import subprocess
+                ffmpeg_exe = get_ffmpeg_path()
+                if ffmpeg_exe and os.path.exists(ffmpeg_exe):
+                    mixed_wav = os.path.abspath(f"temp_mixed_{int(time.time())}.wav")
+                    cmd = [
+                        ffmpeg_exe, "-y",
+                        "-i", self.last_sys_wav,
+                        "-i", self.last_mic_wav,
+                        "-filter_complex", "amix=inputs=2:duration=longest:dropout_transition=0",
+                        mixed_wav
+                    ]
+                    flags = 0x08000000 if os.name == 'nt' else 0
+                    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags)
+                    if res.returncode == 0 and os.path.exists(mixed_wav) and os.path.getsize(mixed_wav) > 100:
+                        audio_target = mixed_wav
+                    else:
+                        audio_target = self.last_sys_wav
                 else:
                     audio_target = self.last_sys_wav
             elif has_sys:
@@ -4257,6 +4297,27 @@ class FKVideoPlayer(QMainWindow):
     def open_updates_dialog(self):
         dlg = UpdatesDialog(parent=self)
         dlg.exec_()
+
+    def _check_updates_background(self):
+        try:
+            from settings_dialogs import GitHubUpdateCheckerWorker
+            self._update_worker = GitHubUpdateCheckerWorker(current_version=APP_VERSION, parent=self)
+            self._update_worker.finished.connect(self._on_update_check_bg_finished)
+            self._update_worker.start()
+        except Exception:
+            pass
+
+    def _on_update_check_bg_finished(self, info: dict):
+        if info.get("is_newer"):
+            tag = info.get("tag_name", "")
+            ans = QMessageBox.question(
+                self,
+                tr('updates_available'),
+                f"{tr('updates_available')}\n\nVersion: {tag}\n\n{tr('btn_download_update')}?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if ans == QMessageBox.Yes:
+                self.open_updates_dialog()
 
     def open_donate(self):
         from settings_dialogs import DONATEPAY_URL

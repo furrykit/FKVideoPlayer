@@ -14,13 +14,13 @@ Settings, Dialogs, and Tools for FKVideoPlayer:
 import json
 import os
 import webbrowser
-from PyQt5.QtCore import Qt, QSize, pyqtSignal
+from PyQt5.QtCore import Qt, QSize, pyqtSignal, QThread
 from PyQt5.QtGui import QFont, QColor, QIcon, QKeySequence
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QComboBox, QSpinBox, QDoubleSpinBox, QSlider, QCheckBox, QTabWidget, QTableWidget, QTableWidgetItem,
     QHeaderView, QFontDialog, QColorDialog, QFileDialog, QProgressBar,
-    QMessageBox, QGroupBox, QRadioButton, QButtonGroup, QWidget
+    QMessageBox, QGroupBox, QRadioButton, QButtonGroup, QWidget, QTextEdit
 )
 
 from i18n import tr, I18nManager
@@ -1318,44 +1318,172 @@ class WelcomeDialog(QDialog):
 
 
 # =========================================================================
-# 7. Updates Dialog
+# 7. Updates Dialog & Real GitHub Release Checker
 # =========================================================================
-DEFAULT_REPO_URL = "https://github.com/fk/FKVideoPlayer"
+DEFAULT_REPO_URL = "https://github.com/furrykit/FKVideoPlayer"
+CURRENT_VERSION = "1.0.0"
+
+
+def parse_version(v_str: str) -> tuple:
+    import re
+    clean = re.sub(r'^[^\d]*', '', str(v_str).strip())
+    parts = re.split(r'[\.\-_]', clean)
+    res = []
+    for p in parts:
+        try:
+            res.append(int(p))
+        except ValueError:
+            break
+    return tuple(res) if res else (0,)
+
+
+class GitHubUpdateCheckerWorker(QThread):
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, repo="furrykit/FKVideoPlayer", current_version=CURRENT_VERSION, parent=None):
+        super().__init__(parent)
+        self.repo = repo
+        self.current_version = current_version
+
+    def run(self):
+        import urllib.request
+        url = f"https://api.github.com/repos/{self.repo}/releases/latest"
+        req = urllib.request.Request(url, headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "FKVideoPlayer-App"
+        })
+        try:
+            # Bypass potential broken local proxy in environment
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(req, timeout=12) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+        except Exception:
+            try:
+                with urllib.request.urlopen(req, timeout=12) as resp:
+                    data = json.loads(resp.read().decode('utf-8'))
+            except Exception as e:
+                self.error.emit(str(e))
+                return
+
+        tag = data.get("tag_name", "").strip()
+        latest_ver = parse_version(tag)
+        curr_ver = parse_version(self.current_version)
+        is_newer = latest_ver > curr_ver
+
+        assets = data.get("assets", [])
+        download_url = data.get("html_url", f"https://github.com/{self.repo}/releases")
+        for a in assets:
+            name = a.get("name", "").lower()
+            if name.endswith(".zip") or name.endswith(".exe"):
+                download_url = a.get("browser_download_url", download_url)
+                break
+
+        self.finished.emit({
+            "is_newer": is_newer,
+            "tag_name": tag,
+            "name": data.get("name", tag),
+            "body": data.get("body", ""),
+            "html_url": data.get("html_url", f"https://github.com/{self.repo}/releases"),
+            "download_url": download_url,
+            "current_version": self.current_version
+        })
+
 
 class UpdatesDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(tr('dlg_updates_title'))
         self.setStyleSheet(DIALOG_STYLE)
-        self.setFixedSize(480, 280)
+        self.resize(520, 380)
+
+        self._worker = None
+        self._download_url = DEFAULT_REPO_URL + "/releases"
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
+
+        # Header info
+        h_ver = QHBoxLayout()
+        lbl_cur = QLabel(f"Current version: v{CURRENT_VERSION}")
+        lbl_cur.setStyleSheet("color: #8E8EA0; font-weight: bold;")
+        h_ver.addWidget(lbl_cur)
+        h_ver.addStretch()
+        layout.addLayout(h_ver)
 
         layout.addWidget(QLabel(tr('updates_repo_url')))
         self.edit_repo = QLineEdit(DEFAULT_REPO_URL)
         layout.addWidget(self.edit_repo)
 
-        self.lbl_status = QLabel(tr('updates_up_to_date'))
-        self.lbl_status.setStyleSheet("color: #34C759; font-weight: bold; font-size: 14px;")
+        self.lbl_status = QLabel(tr('updates_checking'))
+        self.lbl_status.setStyleSheet("color: #007AFF; font-weight: bold; font-size: 14px;")
         self.lbl_status.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.lbl_status)
 
-        layout.addStretch()
+        # Changelog area
+        self.txt_notes = QTextEdit()
+        self.txt_notes.setReadOnly(True)
+        self.txt_notes.setPlaceholderText("Release notes will appear here...")
+        self.txt_notes.setStyleSheet("background-color: #121218; border: 1px solid #282836; border-radius: 6px; padding: 6px; color: #D0D0E0;")
+        layout.addWidget(self.txt_notes)
 
         h_btn = QHBoxLayout()
-        btn_check = QPushButton(tr('btn_check_now'))
-        btn_check.clicked.connect(self._check_updates)
-        h_btn.addWidget(btn_check)
+        self.btn_check = QPushButton(tr('btn_check_now'))
+        self.btn_check.clicked.connect(self._check_updates)
+        h_btn.addWidget(self.btn_check)
 
-        btn_dl = QPushButton(tr('btn_download_update'))
-        btn_dl.setObjectName("PrimaryBtn")
-        btn_dl.clicked.connect(lambda: webbrowser.open(self.edit_repo.text().strip()))
-        h_btn.addWidget(btn_dl)
+        self.btn_dl = QPushButton(tr('btn_download_update'))
+        self.btn_dl.setObjectName("PrimaryBtn")
+        self.btn_dl.setEnabled(False)
+        self.btn_dl.clicked.connect(self._on_download_clicked)
+        h_btn.addWidget(self.btn_dl)
         layout.addLayout(h_btn)
+
+        # Auto-trigger check on opening
+        self._check_updates()
 
     def _check_updates(self):
         self.lbl_status.setText(tr('updates_checking'))
-        import time
-        # Simulate quick check
-        self.lbl_status.setText(tr('updates_up_to_date'))
+        self.lbl_status.setStyleSheet("color: #007AFF; font-weight: bold; font-size: 14px;")
+        self.btn_check.setEnabled(False)
+        self.btn_dl.setEnabled(False)
+        self.txt_notes.clear()
+
+        repo_text = self.edit_repo.text().strip()
+        repo = repo_text.replace("https://github.com/", "").replace("http://github.com/", "").strip("/")
+        if not repo:
+            repo = "furrykit/FKVideoPlayer"
+
+        self._worker = GitHubUpdateCheckerWorker(repo=repo, current_version=CURRENT_VERSION, parent=self)
+        self._worker.finished.connect(self._on_check_finished)
+        self._worker.error.connect(self._on_check_error)
+        self._worker.start()
+
+    def _on_check_finished(self, data: dict):
+        self.btn_check.setEnabled(True)
+        is_newer = data.get("is_newer", False)
+        tag = data.get("tag_name", "")
+        self._download_url = data.get("download_url") or data.get("html_url") or DEFAULT_REPO_URL + "/releases"
+
+        if is_newer:
+            self.lbl_status.setText(f"{tr('updates_available')} (v{tag})")
+            self.lbl_status.setStyleSheet("color: #34C759; font-weight: bold; font-size: 14px;")
+            self.btn_dl.setEnabled(True)
+            body = data.get("body", "").strip() or f"New release {tag} is ready for download."
+            self.txt_notes.setPlainText(body)
+        else:
+            self.lbl_status.setText(f"{tr('updates_up_to_date')} (v{CURRENT_VERSION})")
+            self.lbl_status.setStyleSheet("color: #8E8EA0; font-weight: bold; font-size: 14px;")
+            self.btn_dl.setEnabled(False)
+            self.txt_notes.setPlainText(f"FKVideoPlayer is up to date (version {CURRENT_VERSION}).")
+
+    def _on_check_error(self, err_msg: str):
+        self.btn_check.setEnabled(True)
+        self.lbl_status.setText("Could not reach update server. Check your connection.")
+        self.lbl_status.setStyleSheet("color: #FF3B30; font-weight: bold; font-size: 13px;")
+        self.txt_notes.setPlainText(f"Error details: {err_msg}")
+
+    def _on_download_clicked(self):
+        if self._download_url:
+            webbrowser.open(self._download_url)
+

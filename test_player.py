@@ -43,10 +43,29 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         cls.app = QApplication.instance()
         if cls.app is None:
             cls.app = QApplication([])
+        cls.test_video = os.path.abspath("test_synthetic_fixture.mp4")
+        if not os.path.exists(cls.test_video):
+            import cv2
+            import numpy as np
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            writer = cv2.VideoWriter(cls.test_video, fourcc, 24.0, (320, 240))
+            for i in range(72):
+                frame = np.zeros((240, 320, 3), dtype=np.uint8)
+                frame[:] = (i * 3 % 255, 100, 200)
+                writer.write(frame)
+            writer.release()
+
+    @classmethod
+    def tearDownClass(cls):
+        if hasattr(cls, 'test_video') and os.path.exists(cls.test_video):
+            try:
+                os.remove(cls.test_video)
+            except Exception:
+                pass
 
     def setUp(self):
-        self.video_path = os.path.abspath("swapped_preview_test.mp4")
-        self.assertTrue(os.path.exists(self.video_path), "Тестовое видео должно существовать")
+        self.video_path = self.test_video
+        self.assertTrue(os.path.exists(self.video_path), "Test video fixture should exist")
         self.player = VideoPlayerWindow(self.video_path)
         self.player.show()
 
@@ -1170,6 +1189,31 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
             os.remove(sample_vid)
 
         print("[OK] Multi-track timeline, multi-selection, aspect ratio lock, and window audio capture verified")
+
+    def test_41_ffmpeg_and_updater(self):
+        """Verify get_ffmpeg_path and UpdatesDialog / GitHubUpdateCheckerWorker"""
+        from player import get_ffmpeg_path, APP_VERSION
+        from settings_dialogs import UpdatesDialog, GitHubUpdateCheckerWorker, parse_version
+
+        # 1. Verify get_ffmpeg_path finds local ffmpeg
+        ffmpeg_exe = get_ffmpeg_path()
+        self.assertIsNotNone(ffmpeg_exe, "FFmpeg should be discovered on system")
+        self.assertTrue(os.path.exists(ffmpeg_exe), f"FFmpeg binary should exist at {ffmpeg_exe}")
+
+        # 2. Verify version parsing
+        self.assertEqual(parse_version("1.0.0"), (1, 0, 0))
+        self.assertEqual(parse_version("v2.1.3-beta"), (2, 1, 3))
+        self.assertGreater(parse_version("1.0.1"), parse_version("1.0.0"))
+
+        # 3. Verify UpdatesDialog initialization
+        dlg = UpdatesDialog(parent=self.player)
+        self.assertIsNotNone(dlg.edit_repo)
+        self.assertIn("furrykit/FKVideoPlayer", dlg.edit_repo.text())
+        self.assertIsNotNone(dlg.txt_notes)
+        self.assertIsNotNone(dlg.lbl_status)
+        dlg.close()
+
+        print("[OK] FFmpeg detection and GitHub updater dialog verified")
 
 
 if __name__ == "__main__":

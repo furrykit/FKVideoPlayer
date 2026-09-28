@@ -9,3 +9,4 @@ __pycache__/
 build/
 dist/
 *.spec
+generate_pretty_icon.py
