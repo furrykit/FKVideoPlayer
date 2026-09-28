@@ -9,6 +9,9 @@
 import sys
 import os
 import collections
+import tempfile
+import wave
+import av
 import cv2
 import numpy as np
 from PyQt5.QtCore import Qt, QTimer, QPointF, QRectF, pyqtSignal, QPoint, QUrl
@@ -1032,12 +1035,37 @@ class VideoPlayerWindow(QMainWindow):
 
         # Очистка кэша кадров
         self.frame_cache.clear()
+        self._cap_pos = 0
 
-        # Инициализация звуковой дорожки через QMediaPlayer
-        media_url = QUrl.fromLocalFile(os.path.abspath(file_path))
-        self.audio_player.setMedia(QMediaContent(media_url))
-        self.audio_player.setVolume(self.current_volume if not self.is_muted else 0)
-        self.audio_player.setPosition(0)
+        # Безопасное извлечение аудиодорожки в чистый WAV
+        # Это навсегда устраняет DirectShowPlayerService::doRender 0x80040266
+        self._cleanup_temp_audio()
+        self.has_audio = False
+        try:
+            container = av.open(file_path)
+            if len(container.streams.audio) > 0:
+                temp_wav = os.path.join(tempfile.gettempdir(), f"player_snd_{os.getpid()}_{int(cv2.getTickCount())}.wav")
+                resampler = av.AudioResampler(format='s16', layout='stereo', rate=44100)
+                with wave.open(temp_wav, 'wb') as wav_file:
+                    wav_file.setnchannels(2)
+                    wav_file.setsampwidth(2)
+                    wav_file.setframerate(44100)
+                    for frame in container.decode(audio=0):
+                        for r in resampler.resample(frame):
+                            wav_file.writeframes(r.to_ndarray().tobytes())
+                self.temp_audio_path = temp_wav
+                self.has_audio = True
+            container.close()
+        except Exception:
+            self.has_audio = False
+
+        if getattr(self, 'has_audio', False) and getattr(self, 'temp_audio_path', None) and os.path.exists(self.temp_audio_path):
+            media_url = QUrl.fromLocalFile(self.temp_audio_path)
+            self.audio_player.setMedia(QMediaContent(media_url))
+            self.audio_player.setVolume(self.current_volume if not self.is_muted else 0)
+            self.audio_player.setPosition(0)
+        else:
+            self.audio_player.setMedia(QMediaContent())
 
         self.timeline_slider.fps = self.fps
         self.timeline_slider.setRange(0, max(0, self.total_frames - 1))
@@ -1051,6 +1079,15 @@ class VideoPlayerWindow(QMainWindow):
         # Отображение первого кадра
         self._seek_to_frame(0)
         self.setWindowTitle(f"Pro Video Player — {os.path.basename(file_path)}")
+
+    def _cleanup_temp_audio(self):
+        if getattr(self, 'temp_audio_path', None) and os.path.exists(self.temp_audio_path):
+            try:
+                self.audio_player.setMedia(QMediaContent())
+                os.remove(self.temp_audio_path)
+            except Exception:
+                pass
+            self.temp_audio_path = None
 
     def _get_frame_cached(self, frame_idx):
         """
@@ -1138,16 +1175,18 @@ class VideoPlayerWindow(QMainWindow):
     def _update_audio_rate(self):
         """
         DirectShow/MediaFoundation на Windows гарантированно работает на скоростях от 0.5 до 2.0.
-        При выходе за эти пределы выставляем безопасную частоту и отключаем звук,
-        предотвращая сбой драйверов WMF/ResourceError и зависание потоков.
+        При выходе за эти границы выставляем стандартную частоту 1.0 и отключаем звук,
+        полностью исключая ошибки 'Audio device or filter does not support rate' и зависания.
         """
+        if not getattr(self, 'has_audio', False):
+            return
+
         if 0.5 <= self.playback_speed <= 2.0:
             self.audio_player.setPlaybackRate(self.playback_speed)
             if not self.is_muted:
                 self.audio_player.setMuted(False)
         else:
-            safe_rate = 1.0 if self.playback_speed > 2.0 else 0.5
-            self.audio_player.setPlaybackRate(safe_rate)
+            self.audio_player.setPlaybackRate(1.0)
             self.audio_player.setMuted(True)
 
     def _update_timer_interval(self):
@@ -1331,6 +1370,7 @@ class VideoPlayerWindow(QMainWindow):
         """Корректное освобождение ресурсов при закрытии"""
         self.play_timer.stop()
         self.audio_player.stop()
+        self._cleanup_temp_audio()
         if self.cap is not None:
             self.cap.release()
         event.accept()
@@ -1412,7 +1452,7 @@ class VideoPlayerWindow(QMainWindow):
             }
             QSlider::handle:horizontal:hover {
                 background: #60A5FA;
-                transform: scale(1.2);
+                border-color: #3895FF;
             }
             QToolTip {
                 background-color: #2A2A36;
