@@ -25,7 +25,7 @@ from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 
 from i18n import tr, I18nManager
 from capture import list_open_windows, WindowCaptureWorker
-from audio import MicrophoneRecorder, get_audio_input_devices
+from audio import MicrophoneRecorder, get_audio_input_devices, SystemAudioRecorder
 from projects import ProjectManager
 from settings_dialogs import (
     NewCanvasDialog, WindowCaptureDialog, TextOverlayDialog,
@@ -202,10 +202,16 @@ class OverlayObject:
         self.start_offset = 0.0
         self.sync_with_timeline = True
         self.opacity = 1.0
+        self.keep_aspect_ratio = True
+        self.orig_aspect_ratio = None
+        self.is_visible = True
         self.internal_clock = time.perf_counter()
 
         if self.obj_type != self.TYPE_TEXT:
             self._load_media()
+        else:
+            if self.rect and self.rect.height() > 0:
+                self.orig_aspect_ratio = self.rect.width() / float(self.rect.height())
 
     def _detect_type(self, path: str) -> str:
         ext = os.path.splitext(path)[1].lower()
@@ -230,6 +236,8 @@ class OverlayObject:
                         self.static_image = QImage(data, rgba.width, rgba.height, QImage.Format_RGBA8888).copy()
                 except Exception:
                     pass
+            if self.static_image and not self.static_image.isNull() and self.static_image.height() > 0:
+                self.orig_aspect_ratio = self.static_image.width() / float(self.static_image.height())
         elif self.obj_type == self.TYPE_GIF:
             try:
                 with Image.open(self.file_path) as im:
@@ -243,9 +251,13 @@ class OverlayObject:
                         qimg = QImage(data, rgba.width, rgba.height, QImage.Format_RGBA8888).copy()
                         self.gif_frames.append(qimg)
                     self.gif_total_dur = sum(self.gif_durations) if self.gif_durations else 1.0
+                    if self.gif_frames and self.gif_frames[0].height() > 0:
+                        self.orig_aspect_ratio = self.gif_frames[0].width() / float(self.gif_frames[0].height())
             except Exception:
                 self.obj_type = self.TYPE_IMAGE
                 self.static_image = QImage(self.file_path)
+                if self.static_image and not self.static_image.isNull() and self.static_image.height() > 0:
+                    self.orig_aspect_ratio = self.static_image.width() / float(self.static_image.height())
         elif self.obj_type == self.TYPE_VIDEO:
             self.video_cap = cv2.VideoCapture(self.file_path)
             if self.video_cap.isOpened():
@@ -253,8 +265,15 @@ class OverlayObject:
                 if self.video_fps <= 0 or np.isnan(self.video_fps):
                     self.video_fps = 25.0
                 self.video_total_frames = int(self.video_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                vw = float(self.video_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                vh = float(self.video_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                if vw > 0 and vh > 0:
+                    self.orig_aspect_ratio = vw / vh
             else:
                 self.video_cap = None
+
+        if self.orig_aspect_ratio is None and self.rect and self.rect.height() > 0:
+            self.orig_aspect_ratio = self.rect.width() / float(self.rect.height())
 
     def get_duration(self) -> float:
         if self.obj_type == self.TYPE_VIDEO:
@@ -345,6 +364,8 @@ class OverlayObject:
         return None
 
     def get_frame_at_time(self, elapsed_sec: float) -> QImage:
+        if not getattr(self, 'is_visible', True):
+            return None
         rel_time = max(0.0, float(elapsed_sec) - self.start_time)
         if self.obj_type == self.TYPE_TEXT:
             w, h = max(10, int(self.rect.width())), max(10, int(self.rect.height()))
@@ -424,6 +445,223 @@ class OverlayObject:
         self.video_cache.clear()
 
 
+class OverlayTrackRow(QFrame):
+    def __init__(self, overlay, player, parent=None):
+        super().__init__(parent)
+        self.overlay = overlay
+        self.player = player
+        self.setObjectName("OverlayTrackRow")
+        self.setStyleSheet("""
+            QFrame#OverlayTrackRow {
+                background-color: #1A1A24;
+                border: 1px solid #2C2C3E;
+                border-radius: 4px;
+                padding: 1px 4px;
+            }
+            QFrame#OverlayTrackRow:hover {
+                border-color: #007AFF;
+            }
+            QPushButton {
+                background-color: #242434;
+                border: 1px solid #38384C;
+                border-radius: 3px;
+                color: #E2E2EC;
+                font-size: 10px;
+                padding: 1px 4px;
+                min-width: 0px;
+            }
+            QPushButton:hover {
+                background-color: #323246;
+                border-color: #007AFF;
+            }
+            QSlider::groove:horizontal {
+                height: 4px;
+                background: #28283A;
+                border-radius: 2px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #00E5FF;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                background: #FFFFFF;
+                border: 1px solid #00E5FF;
+                width: 10px;
+                margin-top: -3px;
+                margin-bottom: -3px;
+                border-radius: 5px;
+            }
+        """)
+
+        h_layout = QHBoxLayout(self)
+        h_layout.setContentsMargins(4, 2, 4, 2)
+        h_layout.setSpacing(6)
+
+        # Icon & Name
+        icon = "🎬" if overlay.obj_type == OverlayObject.TYPE_VIDEO else ("🎞️" if overlay.obj_type == OverlayObject.TYPE_GIF else "🔤")
+        fname = os.path.basename(getattr(overlay, 'file_path', 'clip')) if getattr(overlay, 'file_path', None) else (overlay.text[:12] if hasattr(overlay, 'text') else 'Overlay')
+        if len(fname) > 16:
+            fname = fname[:13] + "..."
+        self.lbl_title = QLabel(f"{icon} {fname}")
+        self.lbl_title.setStyleSheet("color: #00E5FF; font-weight: bold; font-size: 11px;")
+        self.lbl_title.setToolTip(getattr(overlay, 'file_path', ''))
+        h_layout.addWidget(self.lbl_title)
+
+        # Play/Pause toggle (for video)
+        if overlay.obj_type == OverlayObject.TYPE_VIDEO:
+            self.btn_play = QPushButton("❚❚" if getattr(overlay, 'is_playing', True) else "▶")
+            self.btn_play.setToolTip("Play / Pause overlay video")
+            self.btn_play.clicked.connect(self._toggle_play)
+            h_layout.addWidget(self.btn_play)
+
+        # Track Slider
+        self.slider = ClickableSlider(Qt.Horizontal)
+        self.dur = max(0.1, overlay.get_duration())
+        self.slider.setRange(0, int(self.dur * 100))
+        self.slider.sliderMoved.connect(self._on_slider_moved)
+        self.slider.sliderPressed.connect(self._on_slider_pressed)
+        self.slider.sliderReleased.connect(self._on_slider_released)
+        h_layout.addWidget(self.slider)
+
+        # Time label
+        self.lbl_time = QLabel(f"00:00.0 / {self._fmt_time(self.dur)}")
+        self.lbl_time.setStyleSheet("color: #8E8EA8; font-family: Consolas, monospace; font-size: 10px; min-width: 85px;")
+        h_layout.addWidget(self.lbl_time)
+
+        # Aspect ratio lock toggle
+        self.btn_aspect = QPushButton("🔗" if getattr(overlay, 'keep_aspect_ratio', True) else "🔓")
+        self.btn_aspect.setToolTip("Lock / Unlock Aspect Ratio")
+        self.btn_aspect.clicked.connect(self._toggle_aspect)
+        h_layout.addWidget(self.btn_aspect)
+
+        # Visibility toggle
+        self.btn_vis = QPushButton("👁️" if getattr(overlay, 'is_visible', True) else "🚫")
+        self.btn_vis.setToolTip("Toggle Overlay Visibility")
+        self.btn_vis.clicked.connect(self._toggle_visibility)
+        h_layout.addWidget(self.btn_vis)
+
+        # Settings dialog button
+        if overlay.obj_type == OverlayObject.TYPE_VIDEO:
+            self.btn_gear = QPushButton("⚙️")
+            self.btn_gear.setToolTip("Video Overlay Settings")
+            self.btn_gear.clicked.connect(self._open_settings)
+            h_layout.addWidget(self.btn_gear)
+
+        # Delete button
+        self.btn_del = QPushButton("✖")
+        self.btn_del.setStyleSheet("color: #FF453A;")
+        self.btn_del.setToolTip("Delete Overlay Track")
+        self.btn_del.clicked.connect(self._delete_overlay)
+        h_layout.addWidget(self.btn_del)
+
+        self._is_scrubbing = False
+
+    def mousePressEvent(self, event):
+        self.player.canvas.selected_overlay = self.overlay
+        self.player.canvas.update()
+        super().mousePressEvent(event)
+
+    def _fmt_time(self, sec: float) -> str:
+        m = int(sec // 60)
+        s = sec % 60
+        return f"{m:02d}:{s:04.1f}"
+
+    def _toggle_play(self):
+        if hasattr(self.overlay, 'is_playing'):
+            self.overlay.is_playing = not getattr(self.overlay, 'is_playing', True)
+            if hasattr(self, 'btn_play'):
+                self.btn_play.setText("❚❚" if self.overlay.is_playing else "▶")
+            self.player.canvas.update()
+
+    def _toggle_aspect(self):
+        cur = getattr(self.overlay, 'keep_aspect_ratio', True)
+        self.overlay.keep_aspect_ratio = not cur
+        self.btn_aspect.setText("🔗" if self.overlay.keep_aspect_ratio else "🔓")
+        self.player.canvas.update()
+
+    def _toggle_visibility(self):
+        cur = getattr(self.overlay, 'is_visible', True)
+        self.overlay.is_visible = not cur
+        self.btn_vis.setText("👁️" if self.overlay.is_visible else "🚫")
+        self.player.canvas.update()
+
+    def _open_settings(self):
+        dlg = VideoOverlaySettingsDialog(self.overlay, parent=self.player)
+        dlg.exec_()
+        self.player.canvas.update()
+
+    def _delete_overlay(self):
+        self.player.canvas.remove_overlay(self.overlay)
+
+    def _on_slider_pressed(self):
+        self._is_scrubbing = True
+
+    def _on_slider_moved(self, val):
+        sec = val / 100.0
+        if self.overlay.obj_type == OverlayObject.TYPE_VIDEO:
+            self.overlay.seek_to_seconds(sec)
+        self.lbl_time.setText(f"{self._fmt_time(sec)} / {self._fmt_time(self.dur)}")
+        self.player.canvas.update()
+
+    def _on_slider_released(self):
+        self._is_scrubbing = False
+        val = self.slider.value()
+        sec = val / 100.0
+        if self.overlay.obj_type == OverlayObject.TYPE_VIDEO:
+            self.overlay.seek_to_seconds(sec)
+        self.player.canvas.update()
+
+    def update_position(self, master_time: float):
+        if self._is_scrubbing:
+            return
+        cur_t = self.overlay.get_current_time(master_time)
+        val = int(cur_t * 100)
+        self.slider.blockSignals(True)
+        self.slider.setValue(val)
+        self.slider.blockSignals(False)
+        self.lbl_time.setText(f"{self._fmt_time(cur_t)} / {self._fmt_time(self.dur)}")
+
+
+class OverlayTrackContainer(QFrame):
+    def __init__(self, player, parent=None):
+        super().__init__(parent)
+        self.player = player
+        self.setObjectName("OverlayTracksContainer")
+        self.v_layout = QVBoxLayout(self)
+        self.v_layout.setContentsMargins(0, 0, 0, 0)
+        self.v_layout.setSpacing(2)
+        self.rows = []
+        self.hide()
+
+    def refresh_tracks(self):
+        for r in self.rows:
+            self.v_layout.removeWidget(r)
+            r.deleteLater()
+        self.rows.clear()
+
+        canvas = getattr(self.player, 'canvas', None)
+        if canvas is None or not hasattr(canvas, 'overlays'):
+            self.hide()
+            return
+
+        overlays = [ov for ov in canvas.overlays if ov.obj_type in (OverlayObject.TYPE_VIDEO, OverlayObject.TYPE_GIF)]
+        if not overlays:
+            self.hide()
+            return
+
+        self.show()
+        for ov in overlays:
+            row = OverlayTrackRow(ov, self.player, self)
+            self.v_layout.addWidget(row)
+            self.rows.append(row)
+
+    def update_positions(self, master_time: float):
+        if not self.isVisible():
+            return
+        for r in self.rows:
+            r.update_position(master_time)
+
+
 class VideoCanvas(QWidget):
     zoom_changed = pyqtSignal(float)
     drawing_changed = pyqtSignal()
@@ -462,11 +700,15 @@ class VideoCanvas(QWidget):
         self.recorder = None
 
         self.overlays = []
-        self.selected_overlay = None
+        self.selected_overlays = []
         self.hover_overlay = None
         self._overlay_drag_mode = None
         self._drag_start_vpt = None
         self._drag_start_rect = None
+        self._drag_start_rects = {}
+        self._is_rubber_banding = False
+        self._rubber_band_start = None
+        self._rubber_band_rect = None
 
         self.overlay_anim_timer = QTimer(self)
         self.overlay_anim_timer.setInterval(33)
@@ -474,6 +716,17 @@ class VideoCanvas(QWidget):
         self.overlay_anim_timer.start()
 
         self.update_cursor()
+
+    @property
+    def selected_overlay(self):
+        return self.selected_overlays[-1] if self.selected_overlays else None
+
+    @selected_overlay.setter
+    def selected_overlay(self, val):
+        if val is None:
+            self.selected_overlays = []
+        elif val not in self.selected_overlays:
+            self.selected_overlays = [val]
 
     def _on_overlay_anim_tick(self):
         if any(ov.obj_type in (OverlayObject.TYPE_GIF, OverlayObject.TYPE_VIDEO) and getattr(ov, 'is_playing', True) for ov in self.overlays):
@@ -565,9 +818,16 @@ class VideoCanvas(QWidget):
             if self.recorder:
                 self.recorder.record_overlay_remove(ov.obj_id)
             ov.close()
-            if self.selected_overlay == ov:
-                self.selected_overlay = None
+            if ov in self.selected_overlays:
+                self.selected_overlays.remove(ov)
+            p = self.window()
+            if hasattr(p, '_refresh_overlay_tracks'):
+                p._refresh_overlay_tracks()
             self.update()
+
+    def remove_selected_overlays(self):
+        for ov in list(self.selected_overlays):
+            self.remove_overlay(ov)
 
     def _get_current_time(self) -> float:
         if self.recorder and self.recorder.is_active():
@@ -792,7 +1052,7 @@ class VideoCanvas(QWidget):
 
         return None, None
 
-    def _show_overlay_context_menu(self, ov, global_pos):
+    def _show_overlay_context_menu(self, ov, global_pos, vpt=None):
         menu = QMenu(self)
         menu.setStyleSheet("""
             QMenu {
@@ -832,6 +1092,8 @@ class VideoCanvas(QWidget):
             act_vid_loop = menu.addAction("Disable Loop" if getattr(ov, 'loop', True) else "Enable Loop")
             menu.addSeparator()
 
+        act_aspect = menu.addAction("🔓 Unlock Aspect Ratio" if getattr(ov, 'keep_aspect_ratio', True) else "🔒 Lock Aspect Ratio")
+        menu.addSeparator()
         act_front = menu.addAction("Bring to Front")
         act_back = menu.addAction("Send to Back")
         act_forward = menu.addAction("Bring Forward")
@@ -839,7 +1101,10 @@ class VideoCanvas(QWidget):
         menu.addSeparator()
         act_dup = menu.addAction("Duplicate")
         menu.addSeparator()
-        act_del = menu.addAction("Delete")
+        act_del = menu.addAction(f"Delete ({len(self.selected_overlays)})" if len(self.selected_overlays) > 1 else "Delete")
+        menu.addSeparator()
+        act_add_media = menu.addAction("➕ Add Image / GIF / PIP Video...")
+        act_add_text = menu.addAction("🔤 Add Text Overlay...")
 
         player = self.window()
         chosen = menu.exec_(global_pos)
@@ -877,8 +1142,87 @@ class VideoCanvas(QWidget):
         elif chosen == act_dup:
             if hasattr(player, 'duplicate_overlay'):
                 player.duplicate_overlay(ov)
+        elif chosen == act_aspect:
+            ov.keep_aspect_ratio = not getattr(ov, 'keep_aspect_ratio', True)
+            self.update()
         elif chosen == act_del:
-            self.remove_overlay(ov)
+            for o in (list(self.selected_overlays) if self.selected_overlays else [ov]):
+                self.remove_overlay(o)
+        elif chosen == act_add_media:
+            if hasattr(player, 'add_overlay_dialog'):
+                player.add_overlay_dialog(pos=vpt)
+        elif chosen == act_add_text:
+            if hasattr(player, 'add_text_overlay'):
+                player.add_text_overlay(pos=vpt)
+
+    def _show_canvas_context_menu(self, vpt, global_pos):
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #242430;
+                color: #E2E2EC;
+                border: 1px solid #3E3E50;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 20px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #007AFF;
+                color: #FFFFFF;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #383848;
+                margin: 4px 6px;
+            }
+        """)
+
+        act_add_media = menu.addAction("➕ Add Image / GIF / PIP Video...")
+        act_add_text = menu.addAction("🔤 Add Text Overlay...")
+        menu.addSeparator()
+        act_undo = menu.addAction("↩ Undo (Ctrl+Z)")
+        act_clear = menu.addAction("🗑 Clear Drawings (Del)")
+        menu.addSeparator()
+        act_fit = menu.addAction("📐 Fit to View")
+        act_100 = menu.addAction("🔍 Reset Zoom 1:1")
+
+        player = self.window()
+        chosen = menu.exec_(global_pos)
+        if chosen == act_add_media:
+            if hasattr(player, 'add_overlay_dialog'):
+                player.add_overlay_dialog(pos=vpt)
+        elif chosen == act_add_text:
+            if hasattr(player, 'add_text_overlay'):
+                player.add_text_overlay(pos=vpt)
+        elif chosen == act_undo:
+            self.undo_last_action()
+        elif chosen == act_clear:
+            self.clear_all_drawings()
+        elif chosen == act_fit:
+            self.fit_to_view()
+        elif chosen == act_100:
+            self.reset_zoom_100()
+
+    def contextMenuEvent(self, event):
+        vpt = self.screen_to_video(QPointF(event.pos()))
+        clicked_ov = None
+        for ov in reversed(self.overlays):
+            if ov.rect.contains(vpt):
+                clicked_ov = ov
+                break
+        if clicked_ov:
+            if clicked_ov not in self.selected_overlays:
+                self.selected_overlays = [clicked_ov]
+            self.active_tool = self.TOOL_SELECT
+            self.update_cursor()
+            self.update()
+            self._show_overlay_context_menu(clicked_ov, event.globalPos(), vpt)
+        else:
+            self._show_canvas_context_menu(vpt, event.globalPos())
+        event.accept()
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -901,7 +1245,8 @@ class VideoCanvas(QWidget):
         if not hasattr(player, 'load_video'):
             return
 
-        if player.cap is None or self.video_width <= 0:
+        has_active_canvas = (self.video_width > 0 and self.video_height > 0)
+        if not has_active_canvas:
             first_path = urls[0].toLocalFile()
             if os.path.exists(first_path):
                 player.load_video(first_path)
@@ -997,28 +1342,48 @@ class VideoCanvas(QWidget):
                 self.erase_strokes_at_video_pt(vpt)
             elif self.active_tool == self.TOOL_SELECT:
                 vpt = self.screen_to_video(pos)
-                if self.selected_overlay:
-                    handle, _ = self._hit_test_overlay_handle(self.selected_overlay, vpt)
+                ctrl_or_shift = bool(event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier))
+
+                # Check handles on currently selected overlays
+                for ov in self.selected_overlays:
+                    handle, _ = self._hit_test_overlay_handle(ov, vpt)
                     if handle == 'del':
-                        self.remove_overlay(self.selected_overlay)
+                        self.remove_overlay(ov)
                         return
-                    elif handle in ('tl', 'tr', 'bl', 'br', 'move'):
+                    elif handle in ('tl', 'tr', 'bl', 'br'):
+                        self.selected_overlays = [ov]
                         self._overlay_drag_mode = handle
                         self._drag_start_vpt = vpt
-                        self._drag_start_rect = QRectF(self.selected_overlay.rect)
+                        self._drag_start_rect = QRectF(ov.rect)
                         return
 
+                # Check overlay body hit
                 hit_ov = None
                 for ov in reversed(self.overlays):
                     if ov.rect.contains(vpt):
                         hit_ov = ov
                         break
 
-                self.selected_overlay = hit_ov
                 if hit_ov:
+                    if ctrl_or_shift:
+                        if hit_ov in self.selected_overlays:
+                            self.selected_overlays.remove(hit_ov)
+                        else:
+                            self.selected_overlays.append(hit_ov)
+                    else:
+                        if hit_ov not in self.selected_overlays:
+                            self.selected_overlays = [hit_ov]
                     self._overlay_drag_mode = 'move'
                     self._drag_start_vpt = vpt
-                    self._drag_start_rect = QRectF(hit_ov.rect)
+                    self._drag_start_rects = {o: QRectF(o.rect) for o in self.selected_overlays}
+                    if self.selected_overlay:
+                        self._drag_start_rect = QRectF(self.selected_overlay.rect)
+                else:
+                    if not ctrl_or_shift:
+                        self.selected_overlays = []
+                    self._is_rubber_banding = True
+                    self._rubber_band_start = vpt
+                    self._rubber_band_rect = QRectF(vpt, vpt)
                 self.update()
 
     def mouseMoveEvent(self, event):
@@ -1036,6 +1401,12 @@ class VideoCanvas(QWidget):
             self.update()
             return
 
+        if self._is_rubber_banding:
+            vpt = self.screen_to_video(pos)
+            self._rubber_band_rect = QRectF(self._rubber_band_start, vpt).normalized()
+            self.update()
+            return
+
         if event.buttons() & Qt.LeftButton:
             if self.active_tool == self.TOOL_PEN and self.current_stroke:
                 vpt = self.screen_to_video(pos)
@@ -1046,46 +1417,42 @@ class VideoCanvas(QWidget):
             elif self.active_tool == self.TOOL_ERASER:
                 vpt = self.screen_to_video(pos)
                 self.erase_strokes_at_video_pt(vpt)
-            elif self.active_tool == self.TOOL_SELECT and self.selected_overlay and self._overlay_drag_mode:
+            elif self.active_tool == self.TOOL_SELECT and self.selected_overlays and self._overlay_drag_mode:
                 vpt = self.screen_to_video(pos)
                 dx = vpt.x() - self._drag_start_vpt.x()
                 dy = vpt.y() - self._drag_start_vpt.y()
                 sr = self._drag_start_rect
                 min_s = 20.0
                 shift_held = bool(event.modifiers() & Qt.ShiftModifier)
-                ratio = sr.width() / max(1.0, sr.height())
 
                 mode = self._overlay_drag_mode
                 if mode == 'move':
-                    self.selected_overlay.rect.moveTo(sr.x() + dx, sr.y() + dy)
-                elif mode == 'br':
-                    new_w = max(min_s, sr.width() + dx)
-                    new_h = max(min_s, sr.height() + dy)
-                    if shift_held:
-                        new_h = new_w / ratio
-                    self.selected_overlay.rect = QRectF(sr.left(), sr.top(), new_w, new_h)
-                elif mode == 'tr':
-                    new_w = max(min_s, sr.width() + dx)
-                    new_h = max(min_s, sr.height() - dy)
-                    if shift_held:
-                        new_h = new_w / ratio
-                    new_top = sr.bottom() - new_h
-                    self.selected_overlay.rect = QRectF(sr.left(), new_top, new_w, new_h)
-                elif mode == 'bl':
-                    new_w = max(min_s, sr.width() - dx)
-                    new_h = max(min_s, sr.height() + dy)
-                    if shift_held:
-                        new_h = new_w / ratio
-                    new_left = sr.right() - new_w
-                    self.selected_overlay.rect = QRectF(new_left, sr.top(), new_w, new_h)
-                elif mode == 'tl':
-                    new_w = max(min_s, sr.width() - dx)
-                    new_h = max(min_s, sr.height() - dy)
-                    if shift_held:
-                        new_h = new_w / ratio
-                    new_left = sr.right() - new_w
-                    new_top = sr.bottom() - new_h
-                    self.selected_overlay.rect = QRectF(new_left, new_top, new_w, new_h)
+                    for o, orig_r in self._drag_start_rects.items():
+                        o.rect.moveTo(orig_r.x() + dx, orig_r.y() + dy)
+                elif self.selected_overlay and sr:
+                    ov = self.selected_overlay
+                    preserve_aspect = getattr(ov, 'keep_aspect_ratio', True) or shift_held
+                    ratio = getattr(ov, 'orig_aspect_ratio', None) or (sr.width() / max(1.0, sr.height()))
+                    if mode == 'br':
+                        new_w = max(min_s, sr.width() + dx)
+                        new_h = (new_w / ratio) if preserve_aspect else max(min_s, sr.height() + dy)
+                        ov.rect = QRectF(sr.left(), sr.top(), new_w, new_h)
+                    elif mode == 'tr':
+                        new_w = max(min_s, sr.width() + dx)
+                        new_h = (new_w / ratio) if preserve_aspect else max(min_s, sr.height() - dy)
+                        new_top = sr.bottom() - new_h
+                        ov.rect = QRectF(sr.left(), new_top, new_w, new_h)
+                    elif mode == 'bl':
+                        new_w = max(min_s, sr.width() - dx)
+                        new_h = (new_w / ratio) if preserve_aspect else max(min_s, sr.height() + dy)
+                        new_left = sr.right() - new_w
+                        ov.rect = QRectF(new_left, sr.top(), new_w, new_h)
+                    elif mode == 'tl':
+                        new_w = max(min_s, sr.width() - dx)
+                        new_h = (new_w / ratio) if preserve_aspect else max(min_s, sr.height() - dy)
+                        new_left = sr.right() - new_w
+                        new_top = sr.bottom() - new_h
+                        ov.rect = QRectF(new_left, new_top, new_w, new_h)
                 self.update()
         else:
             if self.active_tool == self.TOOL_SELECT and self.video_width > 0:
@@ -1141,11 +1508,15 @@ class VideoCanvas(QWidget):
                         clicked_ov = ov
                         break
                 if clicked_ov:
-                    self.selected_overlay = clicked_ov
+                    if clicked_ov not in self.selected_overlays:
+                        self.selected_overlays = [clicked_ov]
                     self.active_tool = self.TOOL_SELECT
                     self.update_cursor()
                     self.update()
-                    self._show_overlay_context_menu(clicked_ov, event.globalPos())
+                    self._show_overlay_context_menu(clicked_ov, event.globalPos(), vpt)
+                    return
+                else:
+                    self._show_canvas_context_menu(vpt, event.globalPos())
                     return
 
         if event.button() == Qt.LeftButton:
@@ -1154,12 +1525,38 @@ class VideoCanvas(QWidget):
                 self.recorder.record_stroke_end(self.current_stroke.stroke_id)
             self.current_stroke = None
 
-            if self.active_tool == self.TOOL_SELECT and self.selected_overlay and self._overlay_drag_mode:
+            if self._is_rubber_banding:
+                self._is_rubber_banding = False
+                if self._rubber_band_rect:
+                    rb = self._rubber_band_rect.normalized()
+                    hit_list = [ov for ov in self.overlays if rb.intersects(ov.rect)]
+                    ctrl_or_shift = bool(event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier))
+                    if ctrl_or_shift:
+                        for ov in hit_list:
+                            if ov not in self.selected_overlays:
+                                self.selected_overlays.append(ov)
+                    else:
+                        self.selected_overlays = hit_list
+                self._rubber_band_rect = None
+                self.update()
+                return
+
+            if self.active_tool == self.TOOL_SELECT and self.selected_overlays and self._overlay_drag_mode:
                 if self.recorder:
-                    self.recorder.record_overlay_transform(self.selected_overlay)
+                    for ov in self.selected_overlays:
+                        self.recorder.record_overlay_transform(ov)
                 self._overlay_drag_mode = None
                 self._drag_start_vpt = None
                 self._drag_start_rect = None
+                self._drag_start_rects = {}
+                self.update()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            if self.active_tool == self.TOOL_SELECT and self.selected_overlays:
+                self.remove_selected_overlays()
+                return
+        super().keyPressEvent(event)
 
     def wheelEvent(self, event):
         num_degrees = event.angleDelta().y() / 8.0
@@ -1199,7 +1596,7 @@ class VideoCanvas(QWidget):
                     painter.drawImage(ov.rect, ov_img)
                     painter.restore()
 
-                if ov == self.hover_overlay and ov != self.selected_overlay and self.active_tool == self.TOOL_SELECT:
+                if ov == self.hover_overlay and ov not in self.selected_overlays and self.active_tool == self.TOOL_SELECT:
                     painter.save()
                     hover_pen = QPen(QColor(0, 229, 255, 120), 1.5 / self.zoom_factor, Qt.DashLine)
                     painter.setPen(hover_pen)
@@ -1207,7 +1604,7 @@ class VideoCanvas(QWidget):
                     painter.drawRect(ov.rect)
                     painter.restore()
 
-                if ov == self.selected_overlay and self.active_tool == self.TOOL_SELECT:
+                if ov in self.selected_overlays and self.active_tool == self.TOOL_SELECT:
                     painter.save()
                     sel_pen = QPen(QColor("#00E5FF"), 1.8 / self.zoom_factor, Qt.DashLine)
                     painter.setPen(sel_pen)
@@ -1235,6 +1632,14 @@ class VideoCanvas(QWidget):
                     painter.drawLine(QPointF(btn_center.x() + del_d, btn_center.y() - del_d),
                                      QPointF(btn_center.x() - del_d, btn_center.y() + del_d))
                     painter.restore()
+
+            if self.active_tool == self.TOOL_SELECT and self._is_rubber_banding and self._rubber_band_rect:
+                painter.save()
+                rb = self._rubber_band_rect.normalized()
+                painter.setBrush(QBrush(QColor(0, 122, 255, 45)))
+                painter.setPen(QPen(QColor(0, 229, 255, 220), 1.5 / self.zoom_factor, Qt.DashLine))
+                painter.drawRect(rb)
+                painter.restore()
 
             for stroke in self.strokes:
                 if not stroke.points:
@@ -1989,9 +2394,13 @@ class FKVideoPlayer(QMainWindow):
         self.overlay_anim_timer.start(33)
 
         self.mic_recorder = MicrophoneRecorder(parent=self)
-        self.is_mic_enabled = True
+        self.is_mic_enabled = False
         self.last_mic_wav = None
         self.selected_mic_device = None
+
+        self.sys_audio_recorder = SystemAudioRecorder(parent=self)
+        self.last_sys_wav = None
+        self.temp_sys_wav_path = None
 
         self.temp_capture_writer = None
         self.temp_capture_video_path = None
@@ -2470,8 +2879,9 @@ class FKVideoPlayer(QMainWindow):
         self.btn_rec_stop.clicked.connect(self.stop_actions_record)
         layout.addWidget(self.btn_rec_stop)
 
-        self.btn_mic_toggle = QPushButton("🎤 Mic: ON")
+        self.btn_mic_toggle = QPushButton("🎤 Mic: OFF")
         self.btn_mic_toggle.setObjectName("BtnMicToggle")
+        self.btn_mic_toggle.setStyleSheet("background-color: #381A1A; color: #FF3B30; border: 1px solid #FF3B30;")
         self.btn_mic_toggle.setToolTip("Toggle microphone commentary recording")
         self.btn_mic_toggle.clicked.connect(self._toggle_microphone)
         layout.addWidget(self.btn_mic_toggle)
@@ -2539,6 +2949,10 @@ class FKVideoPlayer(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(4, 2, 4, 2)
         layout.setSpacing(3)
+
+        # Multi-Track Container for Overlay Videos / GIFs (positioned above base video track)
+        self.overlay_tracks_container = OverlayTrackContainer(self)
+        layout.addWidget(self.overlay_tracks_container)
 
         self.timeline_slider = ClickableSlider(Qt.Horizontal)
         self.timeline_slider.setRange(0, 0)
@@ -2833,6 +3247,7 @@ class FKVideoPlayer(QMainWindow):
 
         self._update_time_label()
         self.setWindowTitle(f"FKVideoPlayer — {proj.name}")
+        self._refresh_overlay_tracks()
         proj.canvas.update()
 
     def _on_tab_close_requested(self, index: int):
@@ -2967,9 +3382,10 @@ class FKVideoPlayer(QMainWindow):
             self.recorder.record_overlay_add(overlay)
 
         self._select_tool(VideoCanvas.TOOL_SELECT)
+        self._refresh_overlay_tracks()
         self.canvas.update()
 
-    def add_overlay_dialog(self):
+    def add_overlay_dialog(self, pos: QPointF = None):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select Image, GIF, or Video Overlay",
@@ -2977,7 +3393,11 @@ class FKVideoPlayer(QMainWindow):
             "Media Files (*.png *.jpg *.jpeg *.bmp *.webp *.gif *.mp4 *.avi *.mov *.mkv *.webm);;Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp);;Videos (*.mp4 *.avi *.mov *.mkv *.webm);;All Files (*.*)"
         )
         if file_path:
-            self.add_overlay(file_path)
+            self.add_overlay(file_path, pos=pos)
+
+    def _refresh_overlay_tracks(self):
+        if hasattr(self, 'overlay_tracks_container') and self.overlay_tracks_container is not None:
+            self.overlay_tracks_container.refresh_tracks()
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -2992,7 +3412,8 @@ class FKVideoPlayer(QMainWindow):
         if not first_path or not os.path.exists(first_path):
             return
 
-        if self.cap is None or self.canvas.video_width <= 0:
+        has_active_canvas = (self.canvas is not None and self.canvas.video_width > 0 and self.canvas.video_height > 0)
+        if not has_active_canvas:
             self.load_video(first_path)
             return
 
@@ -3428,7 +3849,11 @@ class FKVideoPlayer(QMainWindow):
                 f"{self._format_time(cur_sec)} / {self._format_time(tot_sec)}  |  Frame: {self.current_frame_idx + 1} / {self.total_frames}  ({self.fps:.1f} FPS)"
             )
         else:
+            cur_sec = 0.0
             self.lbl_time_info.setText("00:00.00 / 00:00.00  |  Frame: 0 / 0  (0.0 FPS)")
+
+        if hasattr(self, 'overlay_tracks_container') and self.overlay_tracks_container is not None:
+            self.overlay_tracks_container.update_positions(cur_sec)
 
     def closeEvent(self, event):
         self.play_timer.stop()
@@ -3471,7 +3896,7 @@ class FKVideoPlayer(QMainWindow):
             self.temp_mic_wav_path = os.path.abspath(f"temp_mic_{int(time.time())}.wav")
             self.mic_recorder.start_recording(self.temp_mic_wav_path, self.selected_mic_device)
 
-        # Window capture frame recording
+        # Window capture frame and system audio recording
         if self.is_capturing_window:
             self.temp_capture_video_path = os.path.abspath(f"temp_capture_{int(time.time())}.mp4")
             self.temp_capture_writer = None
@@ -3480,6 +3905,9 @@ class FKVideoPlayer(QMainWindow):
             self.current_frame_idx = 0
             self.total_frames = 0
             self.video_path = self.temp_capture_video_path
+            self.temp_sys_wav_path = os.path.abspath(f"temp_sys_{int(time.time())}.wav")
+            if hasattr(self, 'sys_audio_recorder'):
+                self.sys_audio_recorder.start_recording(self.temp_sys_wav_path)
 
         self.recorder.start()
         self.btn_rec_start.setEnabled(False)
@@ -3515,6 +3943,10 @@ class FKVideoPlayer(QMainWindow):
         # Stop microphone
         if self.is_mic_enabled and self.mic_recorder.is_recording:
             self.last_mic_wav = self.mic_recorder.stop_recording()
+
+        # Stop system audio loopback
+        if hasattr(self, 'sys_audio_recorder') and self.sys_audio_recorder.is_recording:
+            self.last_sys_wav = self.sys_audio_recorder.stop_recording()
 
         # Stop capture writer
         if self.temp_capture_writer is not None:
@@ -3578,8 +4010,10 @@ class FKVideoPlayer(QMainWindow):
         out_w = self.canvas.video_width if self.canvas.video_width > 0 else 1920
         out_h = self.canvas.video_height if self.canvas.video_height > 0 else 1080
         has_mic = bool(self.last_mic_wav and os.path.exists(self.last_mic_wav))
+        has_sys = bool(self.last_sys_wav and os.path.exists(self.last_sys_wav))
+        has_audio = has_mic or has_sys
 
-        dlg = ExportDialog(default_w=out_w, default_h=out_h, has_audio=has_mic, parent=self)
+        dlg = ExportDialog(default_w=out_w, default_h=out_h, has_audio=has_audio, parent=self)
         if dlg.exec_() != 1:
             return
 
@@ -3595,7 +4029,30 @@ class FKVideoPlayer(QMainWindow):
         progress_dialog.setValue(0)
 
         v_path = (self.temp_capture_video_path if self.temp_capture_video_path and os.path.exists(self.temp_capture_video_path) else None) or self.video_path or getattr(self.recorder.player, 'video_path', '')
-        audio_target = self.last_mic_wav if cfg['include_audio'] else None
+
+        audio_target = None
+        if cfg['include_audio']:
+            if has_mic and has_sys:
+                import shutil, subprocess
+                ffmpeg_exe = shutil.which("ffmpeg") or r"C:\ffmpeg\ffmpeg.EXE"
+                mixed_wav = os.path.abspath(f"temp_mixed_{int(time.time())}.wav")
+                cmd = [
+                    ffmpeg_exe, "-y",
+                    "-i", self.last_sys_wav,
+                    "-i", self.last_mic_wav,
+                    "-filter_complex", "amix=inputs=2:duration=longest:dropout_transition=0",
+                    mixed_wav
+                ]
+                flags = 0x08000000 if os.name == 'nt' else 0
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags)
+                if res.returncode == 0 and os.path.exists(mixed_wav) and os.path.getsize(mixed_wav) > 100:
+                    audio_target = mixed_wav
+                else:
+                    audio_target = self.last_sys_wav
+            elif has_sys:
+                audio_target = self.last_sys_wav
+            elif has_mic:
+                audio_target = self.last_mic_wav
 
         self.export_worker = ExportVideoWorker(
             video_path=v_path,
@@ -3656,6 +4113,7 @@ class FKVideoPlayer(QMainWindow):
         if self.recorder.is_active():
             self.recorder.record_overlay_add(ov)
         self.canvas.update()
+        self._refresh_overlay_tracks()
 
     def open_new_canvas_dialog(self):
         dlg = NewCanvasDialog(parent=self)
@@ -3927,7 +4385,6 @@ class FKVideoPlayer(QMainWindow):
         # Help Menu
         self.menu_help = menubar.addMenu(tr('menu_help'))
         self.menu_help.addAction(tr('act_about'), self.open_about_dialog, QKeySequence("F1"))
-        self.menu_help.addAction(tr('act_welcome'), self.open_welcome_dialog)
         self.menu_help.addAction(tr('act_updates'), self.open_updates_dialog)
 
     def _refresh_recent_projects_menu(self):

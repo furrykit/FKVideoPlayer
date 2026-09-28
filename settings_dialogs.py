@@ -1059,7 +1059,11 @@ class VideoOverlaySettingsDialog(QDialog):
         self.spin_offset.setValue(getattr(self.overlay, 'start_offset', 0.0))
         self.spin_offset.valueChanged.connect(self._on_offset_changed)
         h_off.addWidget(self.spin_offset)
-        layout.addLayout(h_off)
+        # Aspect Ratio Preservation
+        self.check_aspect = QCheckBox("Preserve Aspect Ratio (Lock)")
+        self.check_aspect.setChecked(getattr(self.overlay, 'keep_aspect_ratio', True))
+        self.check_aspect.toggled.connect(lambda v: setattr(self.overlay, 'keep_aspect_ratio', v))
+        layout.addWidget(self.check_aspect)
 
         layout.addStretch()
 

@@ -14,11 +14,11 @@ CONFIG_PATH = os.path.join(os.path.expanduser('~'), '.fk_videoplayer_config.json
 STRINGS = {
     'en': {
         # Menus
-        'menu_file': '&File',
-        'menu_settings': '&Settings',
-        'menu_video_settings': '&Video Settings',
-        'menu_export': '&Export',
-        'menu_help': '&Help',
+        'menu_file': 'File',
+        'menu_settings': 'Settings',
+        'menu_video_settings': 'Video Settings',
+        'menu_export': 'Export',
+        'menu_help': 'Help',
         'act_new_canvas': 'New Canvas...',
         'act_open_video': 'Open Video...',
         'act_capture_window': 'Capture Window / Stream...',
@@ -39,7 +39,7 @@ STRINGS = {
         'lbl_overlay_opacity': 'Opacity:',
         'lbl_overlay_offset': 'Time Offset (sec):',
         'act_preferences': 'Preferences (Hotkeys, Language, Mic)...',
-        'act_video_props': 'Video & Canvas Properties...',
+        'act_video_props': 'Video and Canvas Properties...',
         'act_export_video': 'Export Video with Edits...',
         'act_export_presets': 'Export Presets Manager...',
         'act_about': 'About FKVideoPlayer',
@@ -152,11 +152,11 @@ STRINGS = {
     },
     'ru': {
         # Menus
-        'menu_file': '&Файл',
-        'menu_settings': '&Настройки',
-        'menu_video_settings': '&Настройки видео',
-        'menu_export': '&Экспорт',
-        'menu_help': '&Справка',
+        'menu_file': 'Файл',
+        'menu_settings': 'Настройки',
+        'menu_video_settings': 'Настройки видео',
+        'menu_export': 'Экспорт',
+        'menu_help': 'Справка',
         'act_new_canvas': 'Новый холст...',
         'act_open_video': 'Открыть видео...',
         'act_capture_window': 'Захват окна / стрима...',

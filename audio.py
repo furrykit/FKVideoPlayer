@@ -11,6 +11,7 @@ Microphone audio commentary recording module for FKVideoPlayer:
 import os
 import struct
 import tempfile
+import threading
 import wave
 import numpy as np
 
@@ -203,4 +204,55 @@ class MicLevelMonitor(QObject):
             self.audio_input = None
         self.io_device = None
         self.level_changed.emit(0)
+
+
+class SystemAudioRecorder(QObject):
+    """
+    Captures Windows system audio (WASAPI Loopback) during window/stream capture.
+    Records clean 44.1kHz 16-bit PCM audio playing to the default speakers/headphones.
+    """
+    def __init__(self, sample_rate=44100, channels=2, parent=None):
+        super().__init__(parent)
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.output_wav_path = None
+        self.is_recording = False
+        self._thread = None
+        self._stop_event = threading.Event()
+
+    def start_recording(self, output_wav_path: str) -> bool:
+        self.output_wav_path = output_wav_path
+        self._stop_event.clear()
+        self.is_recording = True
+        self._thread = threading.Thread(target=self._record_loop, daemon=True)
+        self._thread.start()
+        return True
+
+    def _record_loop(self):
+        try:
+            import soundcard as sc
+            import soundfile as sf
+            spk = sc.default_speaker()
+            loopback = sc.get_microphone(id=str(spk.id), include_loopback=True)
+            with loopback.recorder(samplerate=self.sample_rate, channels=self.channels) as rec:
+                with sf.SoundFile(self.output_wav_path, mode='w', samplerate=self.sample_rate,
+                                  channels=self.channels, subtype='PCM_16') as sf_out:
+                    block_frames = 2048
+                    while not self._stop_event.is_set():
+                        data = rec.record(numframes=block_frames)
+                        sf_out.write(data)
+        except Exception as e:
+            print(f"[SystemAudioRecorder] Loopback error: {e}")
+
+    def stop_recording(self) -> str:
+        if not self.is_recording:
+            return None
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+        self.is_recording = False
+        if self.output_wav_path and os.path.exists(self.output_wav_path) and os.path.getsize(self.output_wav_path) > 44:
+            return self.output_wav_path
+        return None
+
 

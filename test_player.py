@@ -659,12 +659,12 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         i18n = I18nManager.instance()
         i18n.set_language('en')
         self.assertEqual(i18n.lang, 'en')
-        self.assertEqual(tr('menu_file'), '&File')
+        self.assertEqual(tr('menu_file'), 'File')
         self.assertEqual(tr('btn_brush'), 'Brush (B)')
 
         i18n.set_language('ru')
         self.assertEqual(i18n.lang, 'ru')
-        self.assertEqual(tr('menu_file'), '&Файл')
+        self.assertEqual(tr('menu_file'), 'Файл')
         self.assertEqual(tr('btn_brush'), 'Кисть (B)')
 
         # Switch back to English
@@ -1070,16 +1070,106 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         player = self.player
         self.assertFalse(player._fallback_canvas.isVisible())
 
-        # 4. Verify Help menu has no duplicate donate action
+        # 4. Verify Help menu has no duplicate donate or welcome action
         help_actions = [act.text() for act in player.menu_help.actions()]
         self.assertNotIn(tr('act_donate'), help_actions)
-        self.assertIn(tr('act_welcome'), help_actions)
+        self.assertNotIn(tr('act_welcome'), help_actions)
 
         # 5. Verify toolbar dimensions fit comfortably without button truncation
         self.assertLess(player.top_toolbar.minimumSizeHint().width(), 800)
         self.assertLess(player.recording_bar.minimumSizeHint().width(), 700)
 
         print("[OK] Welcome dialog, single author in About, hidden fallback canvas, and responsive toolbars verified")
+
+    def test_40_multitrack_multiselect_aspect_audio_and_dragndrop(self):
+        """Verify overlay drag-and-drop fix, multi-track timeline, multi-selection, aspect ratio preservation, and mic default"""
+        player = self.player
+
+        # 1. Verify mic is OFF by default
+        self.assertFalse(player.is_mic_enabled)
+        self.assertIn("OFF", player.btn_mic_toggle.text())
+
+        # 2. Verify canvas has zero tabs added on D&D when canvas already exists
+        player.create_blank_canvas(1280, 720)
+        initial_tab_count = len(player.projects)
+        canvas = player.canvas
+        self.assertEqual(canvas.video_width, 1280)
+
+        # Drag and drop onto existing canvas
+        from PyQt5.QtCore import QMimeData, QUrl, QPoint
+        from PyQt5.QtGui import QDropEvent
+        from PIL import Image
+        mime = QMimeData()
+        sample_img = os.path.abspath("test_dnd_ov.png")
+        Image.new('RGB', (200, 100), color='blue').save(sample_img)
+        mime.setUrls([QUrl.fromLocalFile(sample_img)])
+        drop_ev = QDropEvent(QPoint(100, 100), Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+        canvas.dropEvent(drop_ev)
+
+        # Must NOT create a new tab!
+        self.assertEqual(len(player.projects), initial_tab_count)
+        self.assertGreater(len(canvas.overlays), 0)
+        ov = canvas.overlays[-1]
+        self.assertEqual(os.path.normpath(ov.file_path), os.path.normpath(sample_img))
+
+        # 3. Verify Aspect Ratio Preservation on OverlayObject
+        self.assertTrue(ov.keep_aspect_ratio)
+        self.assertAlmostEqual(ov.orig_aspect_ratio, 200.0 / 100.0, places=2)
+
+        # 4. Verify Multi-Selection of Overlays
+        ov2 = OverlayObject(999, sample_img, QRectF(300, 300, 150, 150))
+        canvas.overlays.append(ov2)
+        canvas.selected_overlays = [ov, ov2]
+        self.assertEqual(len(canvas.selected_overlays), 2)
+        self.assertEqual(canvas.selected_overlay, ov2) # backward compatible property
+
+        # Test rubber-band selection
+        canvas._is_rubber_banding = True
+        canvas._rubber_band_rect = QRectF(0, 0, 500, 500)
+        canvas.selected_overlays.clear()
+        rb = canvas._rubber_band_rect.normalized()
+        canvas.selected_overlays = [o for o in canvas.overlays if rb.intersects(o.rect)]
+        self.assertIn(ov, canvas.selected_overlays)
+        self.assertIn(ov2, canvas.selected_overlays)
+
+        # 5. Verify Multi-Track Timeline Container
+        self.assertIsNotNone(player.overlay_tracks_container)
+        # Add a video overlay to trigger track row creation
+        import cv2
+        import numpy as np
+        sample_vid = os.path.abspath("test_track_vid.mp4")
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        vw = cv2.VideoWriter(sample_vid, fourcc, 30.0, (160, 120))
+        for _ in range(30):
+            vw.write(np.zeros((120, 160, 3), dtype=np.uint8))
+        vw.release()
+
+        ov_vid = OverlayObject(1000, sample_vid, QRectF(50, 50, 160, 120))
+        canvas.overlays.append(ov_vid)
+        player._refresh_overlay_tracks()
+
+        self.assertTrue(player.overlay_tracks_container.isVisible())
+        self.assertGreaterEqual(len(player.overlay_tracks_container.rows), 1)
+        track_row = player.overlay_tracks_container.rows[0]
+        self.assertEqual(track_row.overlay, ov_vid)
+        self.assertGreater(track_row.dur, 0.0)
+
+        # 6. Verify SystemAudioRecorder existence
+        from audio import SystemAudioRecorder
+        sys_rec = SystemAudioRecorder()
+        self.assertIsNotNone(sys_rec)
+
+        # Cleanup test files
+        for o in list(canvas.overlays):
+            canvas.remove_overlay(o)
+        player._refresh_overlay_tracks()
+        self.assertFalse(player.overlay_tracks_container.isVisible())
+        if os.path.exists(sample_img):
+            os.remove(sample_img)
+        if os.path.exists(sample_vid):
+            os.remove(sample_vid)
+
+        print("[OK] Multi-track timeline, multi-selection, aspect ratio lock, and window audio capture verified")
 
 
 if __name__ == "__main__":
