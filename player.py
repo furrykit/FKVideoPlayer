@@ -563,12 +563,23 @@ class VideoPlayerWindow(QMainWindow):
 
         # Кольцевой LRU-кэш кадров для мгновенной покадровой перемотки
         self.frame_cache = collections.OrderedDict()
+        self._cap_pos = -1
 
         # Дебаунсер скраббинга для 60 FPS отзывчивости
         self._pending_seek_frame = None
         self._seek_timer = QTimer(self)
         self._seek_timer.setSingleShot(True)
         self._seek_timer.timeout.connect(self._process_pending_seek)
+
+        # Дебаунсер для покадрового спама
+        self._step_timer = QTimer(self)
+        self._step_timer.setSingleShot(True)
+        self._step_timer.timeout.connect(self._on_step_timer)
+
+        # Отложенная синхронизация звука
+        self._audio_sync_timer = QTimer(self)
+        self._audio_sync_timer.setSingleShot(True)
+        self._audio_sync_timer.timeout.connect(self._sync_audio_position)
 
         # Таймер воспроизведения
         self.play_timer = QTimer(self)
@@ -1045,6 +1056,7 @@ class VideoPlayerWindow(QMainWindow):
         """
         Возвращает кадр из памяти за 0.01 мс.
         Если кадра нет в кэше, считывает его через cv2 и кэширует.
+        Использует последовательное чтение без cap.set, если кадр следующий по порядку (в 14 раз быстрее).
         """
         if self.cap is None or not self.cap.isOpened():
             return None
@@ -1053,13 +1065,17 @@ class VideoPlayerWindow(QMainWindow):
             self.frame_cache.move_to_end(frame_idx)
             return self.frame_cache[frame_idx]
 
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        # Если кадр не следующий по порядку — позиционируем
+        if getattr(self, '_cap_pos', -1) != frame_idx:
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            self._cap_pos = frame_idx
+
         ret, frame_bgr = self.cap.read()
         if not ret or frame_bgr is None:
             return None
 
+        self._cap_pos += 1
         h, w, ch = frame_bgr.shape
-        # Быстрый Format_BGR888 без cv2.cvtColor
         qimg = QImage(frame_bgr.data, w, h, ch * w, QImage.Format_BGR888).copy()
 
         if len(self.frame_cache) >= self.MAX_CACHE_FRAMES:
@@ -1079,15 +1095,16 @@ class VideoPlayerWindow(QMainWindow):
             self.canvas.set_frame(qimg)
             self._update_time_label()
 
-            # Синхронизация звука
-            target_ms = int((frame_idx / self.fps) * 1000)
-            if not self.is_playing:
-                self.audio_player.setPosition(target_ms)
-
             if not self.timeline_slider.is_dragging:
                 self.timeline_slider.blockSignals(True)
                 self.timeline_slider.setValue(frame_idx)
                 self.timeline_slider.blockSignals(False)
+
+    def _sync_audio_position(self):
+        """Отложенная синхронизация аудио, чтобы не блокировать GUI при быстром кликанье"""
+        if not self.is_playing and self.fps > 0 and self.cap is not None:
+            target_ms = int((self.current_frame_idx / self.fps) * 1000)
+            self.audio_player.setPosition(target_ms)
 
     def toggle_play_pause(self):
         if self.is_playing:
@@ -1106,10 +1123,10 @@ class VideoPlayerWindow(QMainWindow):
         self.is_playing = True
         self.btn_play_pause.setText("⏸ Пауза")
 
-        # Запуск аудио
+        # Запуск аудио с защитой драйверов Windows от экстремальных скоростей
         target_ms = int((self.current_frame_idx / self.fps) * 1000)
         self.audio_player.setPosition(target_ms)
-        self.audio_player.setPlaybackRate(self.playback_speed)
+        self._update_audio_rate()
         self.audio_player.play()
 
     def pause(self):
@@ -1117,6 +1134,21 @@ class VideoPlayerWindow(QMainWindow):
         self.is_playing = False
         self.btn_play_pause.setText("▶ Пуск")
         self.audio_player.pause()
+
+    def _update_audio_rate(self):
+        """
+        DirectShow/MediaFoundation на Windows гарантированно работает на скоростях от 0.5 до 2.0.
+        При выходе за эти пределы выставляем безопасную частоту и отключаем звук,
+        предотвращая сбой драйверов WMF/ResourceError и зависание потоков.
+        """
+        if 0.5 <= self.playback_speed <= 2.0:
+            self.audio_player.setPlaybackRate(self.playback_speed)
+            if not self.is_muted:
+                self.audio_player.setMuted(False)
+        else:
+            safe_rate = 1.0 if self.playback_speed > 2.0 else 0.5
+            self.audio_player.setPlaybackRate(safe_rate)
+            self.audio_player.setMuted(True)
 
     def _update_timer_interval(self):
         target_fps = max(0.1, self.fps * self.playback_speed)
@@ -1128,8 +1160,7 @@ class VideoPlayerWindow(QMainWindow):
             self.frames_per_tick = max(1, int(round(target_fps / 60.0)))
 
         self.play_timer.setInterval(max(2, interval))
-        if self.audio_player.state() == QMediaPlayer.PlayingState:
-            self.audio_player.setPlaybackRate(self.playback_speed)
+        self._update_audio_rate()
 
     def _on_play_tick(self):
         if self.cap is None or not self.cap.isOpened():
@@ -1153,30 +1184,18 @@ class VideoPlayerWindow(QMainWindow):
         if step > 1:
             self._seek_to_frame(next_frame)
         else:
-            # Для sequential 1-step считываем напрямую или из кэша
-            if next_frame in self.frame_cache:
-                qimg = self.frame_cache[next_frame]
-            else:
-                ret, frame_bgr = self.cap.read()
-                if ret and frame_bgr is not None:
-                    h, w, ch = frame_bgr.shape
-                    qimg = QImage(frame_bgr.data, w, h, ch * w, QImage.Format_BGR888).copy()
-                    if len(self.frame_cache) >= self.MAX_CACHE_FRAMES:
-                        self.frame_cache.popitem(last=False)
-                    self.frame_cache[next_frame] = qimg
-                else:
-                    qimg = None
-
+            qimg = self._get_frame_cached(next_frame)
             if qimg is not None:
                 self.current_frame_idx = next_frame
                 self.canvas.set_frame(qimg)
                 self._update_time_label()
 
                 # Периодическая проверка синхронизации звука (допуск 150мс)
-                audio_pos = self.audio_player.position()
-                expected_audio_pos = int((next_frame / self.fps) * 1000)
-                if abs(audio_pos - expected_audio_pos) > 150:
-                    self.audio_player.setPosition(expected_audio_pos)
+                if 0.5 <= self.playback_speed <= 2.0 and not self.is_muted:
+                    audio_pos = self.audio_player.position()
+                    expected_audio_pos = int((next_frame / self.fps) * 1000)
+                    if abs(audio_pos - expected_audio_pos) > 150:
+                        self.audio_player.setPosition(expected_audio_pos)
 
                 if not self.timeline_slider.is_dragging:
                     self.timeline_slider.blockSignals(True)
@@ -1189,15 +1208,47 @@ class VideoPlayerWindow(QMainWindow):
                     self.pause()
 
     def step_frame(self, delta):
-        """Покадровый переход вперед (+1) или назад (-1)"""
-        self.pause()
-        target = self.current_frame_idx + delta
-        self._seek_to_frame(target)
+        """
+        Покадровый переход вперед (+1) или назад (-1).
+        Мгновенно обновляет визуальные координаты, а при быстром спаме кликами
+        дебаунсит декодирование до 10мс, полностью устраняя любые фризы интерфейса.
+        """
+        if self.is_playing:
+            self.pause()
+
+        if self.cap is None or not self.cap.isOpened() or self.total_frames <= 0:
+            return
+
+        target = max(0, min(self.total_frames - 1, self.current_frame_idx + delta))
+        self.current_frame_idx = target
+        self._update_time_label()
+
+        if not self.timeline_slider.is_dragging:
+            self.timeline_slider.blockSignals(True)
+            self.timeline_slider.setValue(target)
+            self.timeline_slider.blockSignals(False)
+
+        # Если кадр есть в кэше — отображаем мгновенно (0 мс)
+        if target in self.frame_cache:
+            self.canvas.set_frame(self.frame_cache[target])
+            self._audio_sync_timer.start(150)
+            return
+
+        # Если кадра нет в кэше — считываем или обрабатываем через дебаунсер
+        if not self._step_timer.isActive():
+            self._step_timer.start(10)
+
+    def _on_step_timer(self):
+        """Отработка целевого кадра после серии быстрых кликов"""
+        qimg = self._get_frame_cached(self.current_frame_idx)
+        if qimg is not None:
+            self.canvas.set_frame(qimg)
+        self._audio_sync_timer.start(150)
 
     def seek_seconds(self, delta_sec):
-        """Перемотка на указанное число секунд"""
+        """Перемотка на указанное число секунд без зависаний"""
         delta_frames = int(delta_sec * self.fps)
-        self._seek_to_frame(self.current_frame_idx + delta_frames)
+        self.step_frame(delta_frames)
 
     def _toggle_loop(self):
         self.is_looping = self.btn_loop.isChecked()

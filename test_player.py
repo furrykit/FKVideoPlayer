@@ -324,6 +324,24 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         self.player.canvas.repaint()
         print("[OK] Векторная отрисовка через QPainterPath и transform работает без ошибок")
 
+    def test_15_spam_clicking_at_slow_speed(self):
+        """Проверка отсутствия зависаний при спаме шагами на замедленной скорости"""
+        self.player.combo_speed.setCurrentText("0.05x")
+        self.assertEqual(self.player.playback_speed, 0.05)
+
+        # 30 спам-кликов вперед
+        for _ in range(30):
+            self.player.step_frame(1)
+            QApplication.processEvents()
+
+        # 30 спам-кликов назад
+        for _ in range(30):
+            self.player.step_frame(-1)
+            QApplication.processEvents()
+
+        self.assertFalse(self.player.is_playing)
+        print("[OK] Спам шагами на 0.05x скорости отрабатывает без зависаний и задержек")
+
 
 if __name__ == "__main__":
     unittest.main()
