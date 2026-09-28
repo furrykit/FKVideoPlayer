@@ -134,3 +134,73 @@ class MicrophoneRecorder(QObject):
                     pass
 
         return self.final_wav_path if (self.final_wav_path and os.path.exists(self.final_wav_path)) else None
+
+
+class MicLevelMonitor(QObject):
+    level_changed = pyqtSignal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.audio_input = None
+        self.io_device = None
+        self.is_monitoring = False
+
+    def start_monitoring(self, device_name: str = None) -> bool:
+        if self.is_monitoring:
+            self.stop_monitoring()
+
+        fmt = QAudioFormat()
+        fmt.setSampleRate(44100)
+        fmt.setChannelCount(1)
+        fmt.setSampleSize(16)
+        fmt.setCodec("audio/pcm")
+        fmt.setByteOrder(QAudioFormat.LittleEndian)
+        fmt.setSampleType(QAudioFormat.SignedInt)
+
+        device_info = QAudioDeviceInfo.defaultInputDevice()
+        if device_name:
+            for d in QAudioDeviceInfo.availableDevices(QAudio.AudioInput):
+                if d.deviceName().strip() == device_name.strip():
+                    device_info = d
+                    break
+
+        if not device_info.isFormatSupported(fmt):
+            fmt = device_info.nearestFormat(fmt)
+
+        try:
+            self.audio_input = QAudioInput(device_info, fmt, self)
+            self.io_device = self.audio_input.start()
+            if self.io_device:
+                self.io_device.readyRead.connect(self._on_ready_read)
+                self.is_monitoring = True
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _on_ready_read(self):
+        if not self.io_device:
+            return
+        data = self.io_device.readAll()
+        if not data or len(data) < 2:
+            return
+        try:
+            samples = np.frombuffer(data, dtype=np.int16)
+            if len(samples) > 0:
+                peak = float(np.max(np.abs(samples))) / 32768.0
+                level = min(100, int(peak * 180.0))
+                self.level_changed.emit(level)
+        except Exception:
+            pass
+
+    def stop_monitoring(self):
+        self.is_monitoring = False
+        if self.audio_input:
+            try:
+                self.audio_input.stop()
+            except Exception:
+                pass
+            self.audio_input = None
+        self.io_device = None
+        self.level_changed.emit(0)
+

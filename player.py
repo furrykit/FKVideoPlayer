@@ -29,6 +29,7 @@ from projects import ProjectManager
 from settings_dialogs import (
     NewCanvasDialog, WindowCaptureDialog, TextOverlayDialog,
     ExportDialog, PreferencesDialog, AboutDialog, UpdatesDialog,
+    VideoOverlaySettingsDialog,
     DEFAULT_HOTKEYS, HOTKEYS_CONFIG_PATH
 )
 
@@ -194,6 +195,14 @@ class OverlayObject:
         self.video_last_idx = -1
         self.video_cache = collections.OrderedDict()
 
+        self.is_playing = True
+        self.loop = True
+        self.playback_speed = 1.0
+        self.start_offset = 0.0
+        self.sync_with_timeline = True
+        self.opacity = 1.0
+        self.internal_clock = time.perf_counter()
+
         if self.obj_type != self.TYPE_TEXT:
             self._load_media()
 
@@ -274,7 +283,11 @@ class OverlayObject:
                 return self.static_image
             if self.gif_total_dur <= 0:
                 return self.gif_frames[0]
-            cycle_time = rel_time % self.gif_total_dur
+            if getattr(self, 'sync_with_timeline', True):
+                v_time = max(0.0, float(elapsed_sec) - self.start_time)
+            else:
+                v_time = max(0.0, time.perf_counter() - getattr(self, 'internal_clock', 0.0))
+            cycle_time = v_time % self.gif_total_dur
             acc = 0.0
             for i, dur in enumerate(self.gif_durations):
                 acc += dur
@@ -284,7 +297,24 @@ class OverlayObject:
         elif self.obj_type == self.TYPE_VIDEO:
             if self.video_cap is None or not self.video_cap.isOpened() or self.video_total_frames <= 0:
                 return None
-            target_f = int(rel_time * self.video_fps) % self.video_total_frames
+
+            if not getattr(self, 'is_playing', True):
+                if self.video_cached_frame is not None:
+                    return self.video_cached_frame
+
+            spd = max(0.1, getattr(self, 'playback_speed', 1.0))
+            offset = getattr(self, 'start_offset', 0.0)
+
+            if getattr(self, 'sync_with_timeline', True):
+                v_time = max(0.0, (float(elapsed_sec) - self.start_time) * spd + offset)
+            else:
+                now = time.perf_counter()
+                v_time = max(0.0, (now - getattr(self, 'internal_clock', now)) * spd + offset)
+
+            if getattr(self, 'loop', True) and self.video_total_frames > 0:
+                target_f = int(v_time * self.video_fps) % self.video_total_frames
+            else:
+                target_f = min(self.video_total_frames - 1, max(0, int(v_time * self.video_fps)))
             if target_f in self.video_cache:
                 self.video_cache.move_to_end(target_f)
                 return self.video_cache[target_f]
@@ -368,7 +398,16 @@ class VideoCanvas(QWidget):
         self._drag_start_vpt = None
         self._drag_start_rect = None
 
+        self.overlay_anim_timer = QTimer(self)
+        self.overlay_anim_timer.setInterval(33)
+        self.overlay_anim_timer.timeout.connect(self._on_overlay_anim_tick)
+        self.overlay_anim_timer.start()
+
         self.update_cursor()
+
+    def _on_overlay_anim_tick(self):
+        if any(ov.obj_type in (OverlayObject.TYPE_GIF, OverlayObject.TYPE_VIDEO) and getattr(ov, 'is_playing', True) for ov in self.overlays):
+            self.update()
 
     def set_bgr_frame(self, frame_bgr: np.ndarray):
         if frame_bgr is None:
@@ -705,6 +744,15 @@ class VideoCanvas(QWidget):
             }
         """)
 
+        act_vid_settings = None
+        act_vid_play = None
+        act_vid_loop = None
+        if ov.obj_type == OverlayObject.TYPE_VIDEO:
+            act_vid_settings = menu.addAction("⚙️ Video Playback Settings...")
+            act_vid_play = menu.addAction("❚❚ Pause Video" if getattr(ov, 'is_playing', True) else "▶ Play Video")
+            act_vid_loop = menu.addAction("Disable Loop" if getattr(ov, 'loop', True) else "Enable Loop")
+            menu.addSeparator()
+
         act_front = menu.addAction("Bring to Front")
         act_back = menu.addAction("Send to Back")
         act_forward = menu.addAction("Bring Forward")
@@ -716,7 +764,17 @@ class VideoCanvas(QWidget):
 
         player = self.window()
         chosen = menu.exec_(global_pos)
-        if chosen == act_front:
+        if chosen == act_vid_settings:
+            dlg = VideoOverlaySettingsDialog(ov, parent=self)
+            dlg.exec_()
+            self.update()
+        elif chosen == act_vid_play:
+            ov.is_playing = not getattr(ov, 'is_playing', True)
+            self.update()
+        elif chosen == act_vid_loop:
+            ov.loop = not getattr(ov, 'loop', True)
+            self.update()
+        elif chosen == act_front:
             if hasattr(player, 'bring_overlay_to_front'):
                 player.bring_overlay_to_front(ov)
         elif chosen == act_back:
@@ -803,6 +861,11 @@ class VideoCanvas(QWidget):
                     if self.recorder and self.recorder.is_active():
                         self.recorder.record_overlay_transform(ov)
                     self.update()
+                return
+            elif self.selected_overlay.obj_type == OverlayObject.TYPE_VIDEO:
+                dlg = VideoOverlaySettingsDialog(self.selected_overlay, parent=self)
+                dlg.exec_()
+                self.update()
                 return
         super().mouseDoubleClickEvent(event)
 
@@ -1042,7 +1105,11 @@ class VideoCanvas(QWidget):
             for ov in self.overlays:
                 ov_img = ov.get_frame_at_time(cur_time)
                 if ov_img and not ov_img.isNull():
+                    painter.save()
+                    if hasattr(ov, 'opacity') and ov.opacity < 1.0:
+                        painter.setOpacity(ov.opacity)
                     painter.drawImage(ov.rect, ov_img)
+                    painter.restore()
 
                 if ov == self.hover_overlay and ov != self.selected_overlay and self.active_tool == self.TOOL_SELECT:
                     painter.save()
@@ -1543,7 +1610,11 @@ class ExportVideoWorker(QThread):
             for ov in active_overlays.values():
                 ov_img = ov.get_frame_at_time(t)
                 if ov_img and not ov_img.isNull():
+                    painter.save()
+                    if hasattr(ov, 'opacity') and ov.opacity < 1.0:
+                        painter.setOpacity(ov.opacity)
                     painter.drawImage(ov.rect, ov_img)
+                    painter.restore()
 
             for s in active_strokes.values():
                 pts = s['points']
@@ -1882,8 +1953,8 @@ class FKVideoPlayer(QMainWindow):
         self.recording_bar = QFrame()
         self.recording_bar.setObjectName("RecordBar")
         layout = QHBoxLayout(self.recording_bar)
-        layout.setContentsMargins(6, 3, 6, 3)
-        layout.setSpacing(5)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(4)
 
         self.btn_rec_start = QPushButton("⏺ Record")
         self.btn_rec_start.setObjectName("BtnRecord")
@@ -1913,20 +1984,20 @@ class FKVideoPlayer(QMainWindow):
 
         self._add_separator(layout)
 
-        self.btn_rec_export = QPushButton("💾 Export MP4...")
+        self.btn_rec_export = QPushButton("💾 Export...")
         self.btn_rec_export.setObjectName("BtnExportRec")
         self.btn_rec_export.setToolTip("Export recorded actions to MP4 video (Ctrl+E)")
         self.btn_rec_export.setEnabled(False)
         self.btn_rec_export.clicked.connect(self.export_recorded_video)
         layout.addWidget(self.btn_rec_export)
 
-        self.btn_rec_save = QPushButton("📥 Save JSON")
+        self.btn_rec_save = QPushButton("📥 Save")
         self.btn_rec_save.setToolTip("Save actions session to JSON")
         self.btn_rec_save.setEnabled(False)
         self.btn_rec_save.clicked.connect(self.save_actions_json)
         layout.addWidget(self.btn_rec_save)
 
-        self.btn_rec_load = QPushButton("📤 Load JSON")
+        self.btn_rec_load = QPushButton("📤 Load")
         self.btn_rec_load.setToolTip("Load actions session from JSON")
         self.btn_rec_load.clicked.connect(self.load_actions_json)
         layout.addWidget(self.btn_rec_load)
@@ -1942,8 +2013,8 @@ class FKVideoPlayer(QMainWindow):
         panel = QFrame()
         panel.setObjectName("BottomPanel")
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(6, 4, 6, 4)
-        layout.setSpacing(4)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(3)
 
         self.timeline_slider = ClickableSlider(Qt.Horizontal)
         self.timeline_slider.setRange(0, 0)
@@ -1955,14 +2026,14 @@ class FKVideoPlayer(QMainWindow):
 
         ctrl_layout = QHBoxLayout()
         ctrl_layout.setContentsMargins(0, 0, 0, 0)
-        ctrl_layout.setSpacing(5)
+        ctrl_layout.setSpacing(3)
 
-        self.btn_rewind_5s = QPushButton("⏮ -5s")
+        self.btn_rewind_5s = QPushButton("-5s")
         self.btn_rewind_5s.setToolTip("Rewind 5 seconds (J or Ctrl+Left)")
         self.btn_rewind_5s.clicked.connect(lambda: self.seek_seconds(-5.0))
         ctrl_layout.addWidget(self.btn_rewind_5s)
 
-        self.btn_rewind_1s = QPushButton("◀◀ -1s")
+        self.btn_rewind_1s = QPushButton("-1s")
         self.btn_rewind_1s.setToolTip("Rewind 1 second (Shift+Left)")
         self.btn_rewind_1s.clicked.connect(lambda: self.seek_seconds(-1.0))
         ctrl_layout.addWidget(self.btn_rewind_1s)
@@ -1983,12 +2054,12 @@ class FKVideoPlayer(QMainWindow):
         self.btn_next_frame.clicked.connect(lambda: self.step_frame(1))
         ctrl_layout.addWidget(self.btn_next_frame)
 
-        self.btn_forward_1s = QPushButton("+1s ▶▶")
+        self.btn_forward_1s = QPushButton("+1s")
         self.btn_forward_1s.setToolTip("Forward 1 second (Shift+Right)")
         self.btn_forward_1s.clicked.connect(lambda: self.seek_seconds(1.0))
         ctrl_layout.addWidget(self.btn_forward_1s)
 
-        self.btn_forward_5s = QPushButton("+5s ⏭")
+        self.btn_forward_5s = QPushButton("+5s")
         self.btn_forward_5s.setToolTip("Forward 5 seconds (L or Ctrl+Right)")
         self.btn_forward_5s.clicked.connect(lambda: self.seek_seconds(5.0))
         ctrl_layout.addWidget(self.btn_forward_5s)
@@ -2003,7 +2074,7 @@ class FKVideoPlayer(QMainWindow):
         self._add_separator(ctrl_layout)
 
         self.btn_mute = QPushButton("🔊")
-        self.btn_mute.setFixedSize(26, 24)
+        self.btn_mute.setFixedSize(24, 22)
         self.btn_mute.setToolTip("Toggle mute (M)")
         self.btn_mute.clicked.connect(self.toggle_mute)
         ctrl_layout.addWidget(self.btn_mute)
@@ -2011,14 +2082,14 @@ class FKVideoPlayer(QMainWindow):
         self.slider_volume = QSlider(Qt.Horizontal)
         self.slider_volume.setRange(0, 100)
         self.slider_volume.setValue(self.current_volume)
-        self.slider_volume.setFixedWidth(70)
+        self.slider_volume.setFixedWidth(65)
         self.slider_volume.setFocusPolicy(Qt.NoFocus)
         self.slider_volume.setToolTip("Volume (Up / Down)")
         self.slider_volume.valueChanged.connect(self.set_volume)
         ctrl_layout.addWidget(self.slider_volume)
 
         self.lbl_volume = QLabel(f"{self.current_volume}%")
-        self.lbl_volume.setMinimumWidth(32)
+        self.lbl_volume.setMinimumWidth(28)
         ctrl_layout.addWidget(self.lbl_volume)
 
         self._add_separator(ctrl_layout)
@@ -2039,7 +2110,7 @@ class FKVideoPlayer(QMainWindow):
         ctrl_layout.addStretch(1)
 
         self.lbl_time_info = QLabel("00:00.00 / 00:00.00  |  Frame: 0 / 0  (0.0 FPS)")
-        self.lbl_time_info.setStyleSheet("font-family: Consolas, monospace; font-size: 12px; color: #9EABB8;")
+        self.lbl_time_info.setStyleSheet("font-family: Consolas, monospace; font-size: 11px; color: #9EABB8;")
         ctrl_layout.addWidget(self.lbl_time_info)
 
         layout.addLayout(ctrl_layout)
@@ -2996,8 +3067,92 @@ class FKVideoPlayer(QMainWindow):
         dlg.exec_()
 
     def open_donate(self):
-        from settings_dialogs import DONATE_URL
-        webbrowser.open(DONATE_URL)
+        from settings_dialogs import DONATEPAY_URL
+        import webbrowser
+        webbrowser.open(DONATEPAY_URL)
+
+    def has_unsaved_changes(self) -> bool:
+        if hasattr(self, 'canvas') and self.canvas:
+            if len(self.canvas.strokes) > 0 or len(self.canvas.overlays) > 0:
+                return True
+        if hasattr(self, 'recorder') and self.recorder:
+            if self.recorder.is_active() or len(self.recorder.events) > 0:
+                return True
+        return False
+
+    def prompt_unsaved_changes(self) -> bool:
+        if not self.has_unsaved_changes():
+            return True
+        if os.environ.get("QT_QPA_PLATFORM") == "offscreen" or getattr(self, '_suppress_unsaved_prompt', False):
+            return True
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle(tr('prompt_unsaved_title'))
+        msg.setText(tr('prompt_unsaved_text'))
+        msg.setIcon(QMessageBox.Question)
+        btn_save = msg.addButton(tr('btn_export_save'), QMessageBox.AcceptRole)
+        btn_save.setStyleSheet("background-color: #007AFF; color: #FFFFFF; font-weight: bold;")
+        btn_discard = msg.addButton(tr('btn_discard'), QMessageBox.DestructiveRole)
+        btn_cancel = msg.addButton(QMessageBox.Cancel)
+        msg.exec_()
+
+        clicked = msg.clickedButton()
+        if clicked == btn_save:
+            self.export_recorded_video()
+            return True
+        elif clicked == btn_discard:
+            return True
+        else:
+            return False
+
+    def close_project(self):
+        if not self.prompt_unsaved_changes():
+            return
+
+        self._stop_window_capture()
+        if self.is_playing:
+            self.toggle_play_pause()
+
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+
+        self.video_path = ""
+        self.total_frames = 0
+        self.current_frame_idx = 0
+        if hasattr(self, 'recorder') and self.recorder:
+            if self.recorder.is_active():
+                self.recorder.stop()
+            self.recorder.events.clear()
+
+        self.canvas.strokes.clear()
+        self.canvas.undo_stack.clear()
+        for ov in self.canvas.overlays:
+            ov.close()
+        self.canvas.overlays.clear()
+        self.canvas.selected_overlay = None
+        self.canvas.current_qimage = None
+        self.canvas.video_width = 0
+        self.canvas.video_height = 0
+
+        self.timeline_slider.setRange(0, 0)
+        self.timeline_slider.setValue(0)
+        self.setWindowTitle("FKVideoPlayer")
+        if hasattr(self, 'lbl_time_info'):
+            self.lbl_time_info.setText("00:00.00 / 00:00.00  |  Frame: 0 / 0  (0.0 FPS)")
+        if hasattr(self, 'lbl_rec_status'):
+            self.lbl_rec_status.setText("● Project closed")
+        self.canvas.update()
+
+    def closeEvent(self, event):
+        if not self.prompt_unsaved_changes():
+            event.ignore()
+            return
+        self._stop_window_capture()
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+        event.accept()
 
     def _create_menu_bar(self):
         menubar = self.menuBar()
@@ -3044,7 +3199,8 @@ class FKVideoPlayer(QMainWindow):
         self.menu_file = menubar.addMenu(tr('menu_file'))
         self.menu_file.addAction(tr('act_new_canvas'), self.open_new_canvas_dialog, QKeySequence("Ctrl+N"))
         self.menu_file.addAction(tr('act_open_video'), self.open_file_dialog, QKeySequence("Ctrl+O"))
-        self.menu_file.addAction(tr('act_capture_window'), self.open_window_capture_dialog, QKeySequence("Ctrl+W"))
+        self.menu_file.addAction(tr('act_capture_window'), self.open_window_capture_dialog, QKeySequence("Ctrl+Shift+W"))
+        self.menu_file.addAction(tr('act_close_project'), self.close_project, QKeySequence("Ctrl+W"))
 
         self.menu_recent = self.menu_file.addMenu(tr('act_recent_projects'))
         self._refresh_recent_projects_menu()
@@ -3242,10 +3398,11 @@ class FKVideoPlayer(QMainWindow):
                 color: #E2E2EC;
                 border: 1px solid #3B3B4E;
                 border-radius: 5px;
-                padding: 5px 9px;
+                padding: 4px 6px;
                 font-weight: 500;
-                font-size: 12px;
+                font-size: 11px;
                 font-family: 'Segoe UI', Arial, sans-serif;
+                min-width: 0px;
             }
             QPushButton:hover {
                 background-color: #373748;
@@ -3262,7 +3419,7 @@ class FKVideoPlayer(QMainWindow):
             #PlayButton {
                 background-color: #248A3D;
                 font-weight: bold;
-                min-width: 80px;
+                min-width: 58px;
                 border-color: #2EA249;
             }
             #PlayButton:hover {
@@ -3273,8 +3430,53 @@ class FKVideoPlayer(QMainWindow):
                 color: #E2E2EC;
                 border: 1px solid #3B3B4E;
                 border-radius: 4px;
-                padding: 4px 6px;
+                padding: 3px 6px;
+                font-size: 11px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #222230;
+                color: #FFFFFF;
+                selection-background-color: #007AFF;
+                selection-color: #FFFFFF;
+                border: 1px solid #3E3E52;
+                outline: 0;
+                padding: 4px;
+            }
+            QCheckBox, QRadioButton {
+                color: #E2E2EC;
                 font-size: 12px;
+                spacing: 6px;
+            }
+            QCheckBox:hover, QRadioButton:hover {
+                color: #FFFFFF;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border: 1px solid #3E3E54;
+                border-radius: 4px;
+                background-color: #222230;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #007AFF;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #007AFF;
+                border-color: #007AFF;
+            }
+            QRadioButton::indicator {
+                width: 16px;
+                height: 16px;
+                border: 1px solid #3E3E54;
+                border-radius: 8px;
+                background-color: #222230;
+            }
+            QRadioButton::indicator:hover {
+                border-color: #007AFF;
+            }
+            QRadioButton::indicator:checked {
+                background-color: #007AFF;
+                border-color: #007AFF;
             }
             QComboBox::drop-down {
                 border: 0px;

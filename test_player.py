@@ -28,9 +28,12 @@ from player import (
 )
 from i18n import tr, I18nManager
 from capture import list_open_windows, capture_window_frame
-from audio import MicrophoneRecorder, get_audio_input_devices
+from audio import MicrophoneRecorder, get_audio_input_devices, MicLevelMonitor
 from projects import ProjectManager
-from settings_dialogs import NewCanvasDialog, ExportDialog, PreferencesDialog, DEFAULT_EXPORT_PRESETS
+from settings_dialogs import (
+    NewCanvasDialog, ExportDialog, PreferencesDialog, DEFAULT_EXPORT_PRESETS,
+    VideoOverlaySettingsDialog, AboutDialog, DONATEPAY_URL, DONATIONALERTS_URL
+)
 
 
 class TestEnhancedVideoPlayer(unittest.TestCase):
@@ -807,7 +810,63 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
             os.remove(out_mp4)
         print("[OK] Advanced export (x264, custom resolution 640x360, text overlay) executed cleanly")
 
+    def test_30_mic_level_monitor_test(self):
+        """Verify MicLevelMonitor operational and stop safety"""
+        mon = MicLevelMonitor()
+        self.assertFalse(mon.is_monitoring)
+        mon.stop_monitoring()
+        self.assertFalse(mon.is_monitoring)
+        print("[OK] Microphone level monitor testing mechanism verified")
+
+    def test_31_video_overlay_playback_and_settings(self):
+        """Verify video overlay playback properties, speed, loop, and settings dialog"""
+        ov = OverlayObject(50, self.video_path, QRectF(10, 10, 320, 180), start_time=0.0)
+        self.assertEqual(ov.obj_type, OverlayObject.TYPE_VIDEO)
+        self.assertTrue(ov.is_playing)
+        self.assertTrue(ov.loop)
+        self.assertEqual(ov.playback_speed, 1.0)
+        self.assertEqual(ov.opacity, 1.0)
+
+        # Frame reading
+        img1 = ov.get_frame_at_time(0.0)
+        self.assertIsNotNone(img1)
+        self.assertFalse(img1.isNull())
+
+        # Test settings dialog
+        dlg = VideoOverlaySettingsDialog(ov, parent=self.player)
+        self.assertEqual(dlg.check_loop.isChecked(), True)
+        self.assertEqual(dlg.slider_opacity.value(), 100)
+        ov.close()
+        print("[OK] Video overlay playback controls and settings dialog operational")
+
+    def test_32_close_project_and_unsaved_changes(self):
+        """Verify close project and unsaved changes tracking"""
+        self.assertFalse(self.player.has_unsaved_changes())
+
+        # Add a stroke
+        vpt = QPointF(100, 100)
+        s = Stroke(QColor('#FF0000'), 4.0, [vpt], stroke_id=1)
+        self.player.canvas.strokes.append(s)
+        self.assertTrue(self.player.has_unsaved_changes())
+
+        # Close project (bypassing prompt by clearing)
+        self.player.close_project()
+        self.assertEqual(len(self.player.canvas.strokes), 0)
+        self.assertEqual(len(self.player.canvas.overlays), 0)
+        self.assertFalse(self.player.has_unsaved_changes())
+        print("[OK] Close project and unsaved changes tracking operational")
+
+    def test_33_author_and_donations(self):
+        """Verify furrykit authorship and donation endpoints"""
+        self.assertIn("furrykit", tr('about_author').lower())
+        self.assertEqual(DONATEPAY_URL, "https://new.donatepay.ru/donate/ttvfurrykit")
+        self.assertEqual(DONATIONALERTS_URL, "https://www.donationalerts.com/r/ttvfurrykit")
+        dlg = AboutDialog(parent=self.player)
+        self.assertIsNotNone(dlg)
+        print("[OK] Author furrykit and donation links (DonatePay, DonationAlerts) verified")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

@@ -5,6 +5,7 @@ __pycache__/
 *.log
 .codegraph/
 *.mp4
+*.wav
 build/
 dist/
 *.spec

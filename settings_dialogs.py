@@ -18,14 +18,14 @@ from PyQt5.QtCore import Qt, QSize, pyqtSignal
 from PyQt5.QtGui import QFont, QColor, QIcon, QKeySequence
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QComboBox, QSpinBox, QCheckBox, QTabWidget, QTableWidget, QTableWidgetItem,
+    QComboBox, QSpinBox, QDoubleSpinBox, QSlider, QCheckBox, QTabWidget, QTableWidget, QTableWidgetItem,
     QHeaderView, QFontDialog, QColorDialog, QFileDialog, QProgressBar,
     QMessageBox, QGroupBox, QRadioButton, QButtonGroup, QWidget
 )
 
 from i18n import tr, I18nManager
 from capture import list_open_windows
-from audio import get_audio_input_devices
+from audio import get_audio_input_devices, MicLevelMonitor
 
 DIALOG_STYLE = """
 QDialog {
@@ -50,7 +50,7 @@ QGroupBox::title {
     left: 12px;
     padding: 0 5px;
 }
-QLineEdit, QSpinBox, QComboBox {
+QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
     background-color: #222230;
     color: #FFFFFF;
     border: 1px solid #36364A;
@@ -59,8 +59,53 @@ QLineEdit, QSpinBox, QComboBox {
     font-size: 13px;
     selection-background-color: #007AFF;
 }
-QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
     border: 1px solid #007AFF;
+}
+QComboBox QAbstractItemView {
+    background-color: #222230;
+    color: #FFFFFF;
+    selection-background-color: #007AFF;
+    selection-color: #FFFFFF;
+    border: 1px solid #3E3E52;
+    outline: 0;
+    padding: 4px;
+}
+QCheckBox, QRadioButton {
+    color: #E2E2EC;
+    font-size: 13px;
+    spacing: 8px;
+}
+QCheckBox:hover, QRadioButton:hover {
+    color: #FFFFFF;
+}
+QCheckBox::indicator {
+    width: 17px;
+    height: 17px;
+    border: 1px solid #3E3E54;
+    border-radius: 4px;
+    background-color: #222230;
+}
+QCheckBox::indicator:hover {
+    border-color: #007AFF;
+}
+QCheckBox::indicator:checked {
+    background-color: #007AFF;
+    border-color: #007AFF;
+}
+QRadioButton::indicator {
+    width: 17px;
+    height: 17px;
+    border: 1px solid #3E3E54;
+    border-radius: 9px;
+    background-color: #222230;
+}
+QRadioButton::indicator:hover {
+    border-color: #007AFF;
+}
+QRadioButton::indicator:checked {
+    background-color: #007AFF;
+    border-color: #007AFF;
 }
 QPushButton {
     background-color: #282838;
@@ -109,15 +154,18 @@ QTabWidget::pane {
 QTabBar::tab {
     background: #222230;
     color: #A0A0B8;
-    padding: 8px 18px;
+    padding: 8px 16px;
+    min-width: 90px;
+    font-size: 13px;
     border-top-left-radius: 6px;
     border-top-right-radius: 6px;
-    margin-right: 2px;
+    margin-right: 4px;
 }
 QTabBar::tab:selected {
     background: #2E2E40;
     color: #FFFFFF;
     font-weight: bold;
+    border-bottom: 2px solid #007AFF;
 }
 """
 
@@ -673,7 +721,8 @@ class PreferencesDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(tr('dlg_prefs_title'))
         self.setStyleSheet(DIALOG_STYLE)
-        self.resize(550, 460)
+        self.resize(660, 520)
+        self.setMinimumSize(640, 480)
 
         self.hotkeys = dict(DEFAULT_HOTKEYS)
         self._load_hotkeys()
@@ -681,6 +730,7 @@ class PreferencesDialog(QDialog):
         layout = QVBoxLayout(self)
 
         self.tabs = QTabWidget()
+        self.tabs.setUsesScrollButtons(True)
         layout.addWidget(self.tabs)
 
         # Tab 1: Hotkeys
@@ -738,6 +788,10 @@ class PreferencesDialog(QDialog):
         l_audio.addStretch()
         self.tabs.addTab(tab_audio, tr('tab_audio'))
 
+        self.mic_monitor = MicLevelMonitor(self)
+        self.mic_monitor.level_changed.connect(self._on_mic_level)
+        self.btn_test_mic.clicked.connect(self._toggle_mic_test)
+
         # Bottom buttons
         h_btn = QHBoxLayout()
         h_btn.addStretch()
@@ -752,6 +806,32 @@ class PreferencesDialog(QDialog):
         layout.addLayout(h_btn)
 
         self._populate_hotkeys_table()
+
+    def _on_mic_level(self, level: int):
+        self.mic_bar.setValue(level)
+
+    def _toggle_mic_test(self):
+        if self.mic_monitor.is_monitoring:
+            self.mic_monitor.stop_monitoring()
+            self.btn_test_mic.setText(tr('btn_test_mic'))
+            self.mic_bar.setValue(0)
+        else:
+            dev_name = self.combo_mic.currentText().strip()
+            ok = self.mic_monitor.start_monitoring(dev_name)
+            if ok:
+                self.btn_test_mic.setText("Stop Test 🛑")
+            else:
+                QMessageBox.warning(self, "Mic Error", "Unable to start microphone testing on this device.")
+
+    def closeEvent(self, event):
+        if hasattr(self, 'mic_monitor'):
+            self.mic_monitor.stop_monitoring()
+        super().closeEvent(event)
+
+    def reject(self):
+        if hasattr(self, 'mic_monitor'):
+            self.mic_monitor.stop_monitoring()
+        super().reject()
 
     def _load_hotkeys(self):
         try:
@@ -789,6 +869,9 @@ class PreferencesDialog(QDialog):
         self._populate_hotkeys_table()
 
     def _save_all(self):
+        if hasattr(self, 'mic_monitor'):
+            self.mic_monitor.stop_monitoring()
+
         # Save hotkeys
         try:
             with open(HOTKEYS_CONFIG_PATH, 'w', encoding='utf-8') as f:
@@ -806,22 +889,154 @@ class PreferencesDialog(QDialog):
 
 
 # =========================================================================
-# 6. About & Donations Dialog
+# 6. Video Overlay Settings Dialog
 # =========================================================================
-DONATE_URL = "https://boosty.to/fkplayer" # Placeholder URL to be replaced by user
+class VideoOverlaySettingsDialog(QDialog):
+    def __init__(self, overlay, parent=None):
+        super().__init__(parent)
+        self.overlay = overlay
+        self.setWindowTitle(tr('dlg_overlay_video_title'))
+        self.setStyleSheet(DIALOG_STYLE)
+        self.setFixedSize(460, 370)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        fname = os.path.basename(getattr(self.overlay, 'file_path', 'video'))
+        lbl_info = QLabel(f"Video: {fname}")
+        lbl_info.setStyleSheet("font-weight: bold; color: #00E5FF; font-size: 14px;")
+        layout.addWidget(lbl_info)
+
+        # Controls
+        h_play = QHBoxLayout()
+        is_playing = getattr(self.overlay, 'is_playing', True)
+        self.btn_play_pause = QPushButton("❚❚ Pause" if is_playing else "▶ Play")
+        self.btn_play_pause.clicked.connect(self._toggle_play)
+        h_play.addWidget(self.btn_play_pause)
+
+        self.btn_restart = QPushButton("⏮ Restart")
+        self.btn_restart.clicked.connect(self._restart_overlay)
+        h_play.addWidget(self.btn_restart)
+        layout.addLayout(h_play)
+
+        # Loop & Sync
+        self.check_loop = QCheckBox(tr('lbl_overlay_loop'))
+        self.check_loop.setChecked(getattr(self.overlay, 'loop', True))
+        self.check_loop.toggled.connect(self._on_loop_toggled)
+        layout.addWidget(self.check_loop)
+
+        self.check_sync = QCheckBox(tr('lbl_overlay_sync'))
+        self.check_sync.setChecked(getattr(self.overlay, 'sync_with_timeline', True))
+        self.check_sync.toggled.connect(self._on_sync_toggled)
+        layout.addWidget(self.check_sync)
+
+        # Playback speed
+        h_spd = QHBoxLayout()
+        h_spd.addWidget(QLabel(tr('lbl_overlay_speed')))
+        self.combo_speed = QComboBox()
+        self.speeds = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+        for sp in self.speeds:
+            self.combo_speed.addItem(f"{sp:.2f}x", sp)
+        cur_spd = getattr(self.overlay, 'playback_speed', 1.0)
+        idx = self.combo_speed.findData(cur_spd)
+        if idx >= 0:
+            self.combo_speed.setCurrentIndex(idx)
+        self.combo_speed.currentIndexChanged.connect(self._on_speed_changed)
+        h_spd.addWidget(self.combo_speed)
+        layout.addLayout(h_spd)
+
+        # Opacity slider
+        from PyQt5.QtWidgets import QSlider
+        h_op = QHBoxLayout()
+        h_op.addWidget(QLabel(tr('lbl_overlay_opacity')))
+        self.slider_opacity = QSlider(Qt.Horizontal)
+        self.slider_opacity.setRange(10, 100)
+        cur_op = int(getattr(self.overlay, 'opacity', 1.0) * 100)
+        self.slider_opacity.setValue(cur_op)
+        self.lbl_op_val = QLabel(f"{cur_op}%")
+        self.slider_opacity.valueChanged.connect(self._on_opacity_changed)
+        h_op.addWidget(self.slider_opacity)
+        h_op.addWidget(self.lbl_op_val)
+        layout.addLayout(h_op)
+
+        # Start offset
+        h_off = QHBoxLayout()
+        h_off.addWidget(QLabel(tr('lbl_overlay_offset')))
+        self.spin_offset = QDoubleSpinBox()
+        self.spin_offset.setRange(0.0, 3600.0)
+        self.spin_offset.setSingleStep(0.5)
+        self.spin_offset.setValue(getattr(self.overlay, 'start_offset', 0.0))
+        self.spin_offset.valueChanged.connect(self._on_offset_changed)
+        h_off.addWidget(self.spin_offset)
+        layout.addLayout(h_off)
+
+        layout.addStretch()
+
+        btn_close = QPushButton("OK")
+        btn_close.setObjectName("PrimaryBtn")
+        btn_close.clicked.connect(self.accept)
+        layout.addWidget(btn_close)
+
+    def _toggle_play(self):
+        cur = getattr(self.overlay, 'is_playing', True)
+        self.overlay.is_playing = not cur
+        self.btn_play_pause.setText("❚❚ Pause" if self.overlay.is_playing else "▶ Play")
+        if self.parent() and hasattr(self.parent(), 'update'):
+            self.parent().update()
+
+    def _restart_overlay(self):
+        self.overlay.start_offset = 0.0
+        self.spin_offset.setValue(0.0)
+        if hasattr(self.overlay, 'video_cap') and self.overlay.video_cap:
+            try:
+                import cv2
+                self.overlay.video_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            except Exception:
+                pass
+        if self.parent() and hasattr(self.parent(), 'update'):
+            self.parent().update()
+
+    def _on_loop_toggled(self, val):
+        self.overlay.loop = val
+
+    def _on_sync_toggled(self, val):
+        self.overlay.sync_with_timeline = val
+
+    def _on_speed_changed(self):
+        spd = self.combo_speed.currentData()
+        if spd:
+            self.overlay.playback_speed = float(spd)
+
+    def _on_opacity_changed(self, val):
+        self.overlay.opacity = float(val) / 100.0
+        self.lbl_op_val.setText(f"{val}%")
+        if self.parent() and hasattr(self.parent(), 'update'):
+            self.parent().update()
+
+    def _on_offset_changed(self, val):
+        self.overlay.start_offset = float(val)
+        if self.parent() and hasattr(self.parent(), 'update'):
+            self.parent().update()
+
+
+# =========================================================================
+# 7. About & Donations Dialog
+# =========================================================================
+DONATEPAY_URL = "https://new.donatepay.ru/donate/ttvfurrykit"
+DONATIONALERTS_URL = "https://www.donationalerts.com/r/ttvfurrykit"
 
 class AboutDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(tr('dlg_about_title'))
         self.setStyleSheet(DIALOG_STYLE)
-        self.setFixedSize(440, 320)
+        self.setFixedSize(460, 350)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
 
         lbl_title = QLabel("FKVideoPlayer")
-        lbl_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #007AFF;")
+        lbl_title.setStyleSheet("font-size: 22px; font-weight: bold; color: #007AFF;")
         lbl_title.setAlignment(Qt.AlignCenter)
         layout.addWidget(lbl_title)
 
@@ -833,20 +1048,32 @@ class AboutDialog(QDialog):
         lbl_desc = QLabel(tr('about_desc'))
         lbl_desc.setWordWrap(True)
         lbl_desc.setAlignment(Qt.AlignCenter)
-        lbl_desc.setStyleSheet("font-size: 13px; color: #C0C0D4; margin: 10px 0;")
+        lbl_desc.setStyleSheet("font-size: 13px; color: #C0C0D4; margin: 8px 0;")
         layout.addWidget(lbl_desc)
 
         lbl_author = QLabel(tr('about_author'))
-        lbl_author.setStyleSheet("font-size: 12px; color: #707090; font-style: italic;")
+        lbl_author.setStyleSheet("font-size: 13px; color: #00E5FF; font-weight: bold;")
         lbl_author.setAlignment(Qt.AlignCenter)
         layout.addWidget(lbl_author)
 
         layout.addStretch()
 
-        btn_donate = QPushButton(tr('btn_donate_link'))
-        btn_donate.setObjectName("PrimaryBtn")
-        btn_donate.clicked.connect(lambda: webbrowser.open(DONATE_URL))
-        layout.addWidget(btn_donate)
+        lbl_sup = QLabel("Support Creator:")
+        lbl_sup.setStyleSheet("color: #A0A0B8; font-size: 12px; font-weight: 500;")
+        lbl_sup.setAlignment(Qt.AlignCenter)
+        layout.addWidget(lbl_sup)
+
+        h_don = QHBoxLayout()
+        btn_dp = QPushButton("DonatePay")
+        btn_dp.setObjectName("PrimaryBtn")
+        btn_dp.clicked.connect(lambda: webbrowser.open(DONATEPAY_URL))
+        h_don.addWidget(btn_dp)
+
+        btn_da = QPushButton("DonationAlerts")
+        btn_da.setStyleSheet("background-color: #E85D04; color: #FFFFFF; font-weight: bold; border: 1px solid #DC2F02;")
+        btn_da.clicked.connect(lambda: webbrowser.open(DONATIONALERTS_URL))
+        h_don.addWidget(btn_da)
+        layout.addLayout(h_don)
 
         btn_close = QPushButton("Close")
         btn_close.clicked.connect(self.accept)
