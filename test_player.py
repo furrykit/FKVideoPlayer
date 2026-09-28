@@ -1045,6 +1045,42 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         finally:
             QMessageBox.question = old_question
 
+    def test_39_welcome_dialog_and_clean_ui(self):
+        from settings_dialogs import AboutDialog, WelcomeDialog
+        from PyQt5.QtWidgets import QLabel
+
+        # 1. Verify AboutDialog author is not duplicated
+        about = AboutDialog()
+        labels = [lbl.text() for lbl in about.findChildren(QLabel)]
+        author_labels = [l for l in labels if "furrykit" in l and ("Created by" in l or "Создано" in l)]
+        self.assertEqual(len(author_labels), 1)
+        self.assertNotIn("(furrykit) (furrykit)", author_labels[0])
+        self.assertNotIn("furrykit (furrykit)", author_labels[0])
+        about.close()
+
+        # 2. Verify WelcomeDialog
+        welcome = WelcomeDialog()
+        welcome_labels = " ".join([lbl.text() for lbl in welcome.findChildren(QLabel)])
+        self.assertIn("100% free", welcome_labels)
+        self.assertIn("donation", welcome_labels.lower())
+        welcome._on_start_clicked()
+        welcome.close()
+
+        # 3. Verify _fallback_canvas is hidden (no mystery bleed-through text)
+        player = self.player
+        self.assertFalse(player._fallback_canvas.isVisible())
+
+        # 4. Verify Help menu has no duplicate donate action
+        help_actions = [act.text() for act in player.menu_help.actions()]
+        self.assertNotIn(tr('act_donate'), help_actions)
+        self.assertIn(tr('act_welcome'), help_actions)
+
+        # 5. Verify toolbar dimensions fit comfortably without button truncation
+        self.assertLess(player.top_toolbar.minimumSizeHint().width(), 800)
+        self.assertLess(player.recording_bar.minimumSizeHint().width(), 700)
+
+        print("[OK] Welcome dialog, single author in About, hidden fallback canvas, and responsive toolbars verified")
+
 
 if __name__ == "__main__":
     unittest.main()

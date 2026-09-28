@@ -1946,7 +1946,7 @@ class FKVideoPlayer(QMainWindow):
         super().__init__()
         self.setWindowTitle("FKVideoPlayer")
         self.resize(1180, 800)
-        self.setMinimumSize(800, 540)
+        self.setMinimumSize(920, 540)
         self.setAcceptDrops(True)
 
         icon_path = resource_path("icon.ico")
@@ -1954,7 +1954,8 @@ class FKVideoPlayer(QMainWindow):
             self.setWindowIcon(QIcon(icon_path))
 
         self.projects = []
-        self._fallback_canvas = VideoCanvas(self)
+        self._fallback_canvas = VideoCanvas(None)
+        self._fallback_canvas.hide()
         self._fallback_recorder = ActionRecorder(self)
         self._fallback_cache = collections.OrderedDict()
 
@@ -2258,6 +2259,17 @@ class FKVideoPlayer(QMainWindow):
     def showEvent(self, event):
         super().showEvent(event)
         set_dark_titlebar(self)
+        if not getattr(self, '_welcome_checked', False):
+            self._welcome_checked = True
+            from PyQt5.QtCore import QSettings
+            settings = QSettings("furrykit", "FKVideoPlayer")
+            if settings.value("show_welcome", True, type=bool):
+                QTimer.singleShot(250, self.open_welcome_dialog)
+
+    def open_welcome_dialog(self):
+        from settings_dialogs import WelcomeDialog
+        dlg = WelcomeDialog(parent=self)
+        dlg.exec_()
 
     def _init_ui(self):
         self._create_menu_bar()
@@ -2274,6 +2286,8 @@ class FKVideoPlayer(QMainWindow):
         self.project_tabs.setTabsClosable(True)
         self.project_tabs.setMovable(True)
         self.project_tabs.setDocumentMode(True)
+        self.project_tabs.setUsesScrollButtons(True)
+        self.project_tabs.setElideMode(Qt.ElideRight)
         self.project_tabs.tabCloseRequested.connect(self._on_tab_close_requested)
         self.project_tabs.currentChanged.connect(self._on_tab_changed)
 
@@ -2420,33 +2434,7 @@ class FKVideoPlayer(QMainWindow):
         self.btn_clear_all.clicked.connect(self.canvas.clear_all_drawings)
         layout.addWidget(self.btn_clear_all)
 
-        self.btn_add_overlay = QPushButton("🖼️ Add Overlay...")
-        self.btn_add_overlay.setToolTip("Add image, GIF, or secondary video overlay (Ctrl+I)")
-        self.btn_add_overlay.clicked.connect(self.add_overlay_dialog)
-        layout.addWidget(self.btn_add_overlay)
-
         layout.addStretch(1)
-
-        self.lbl_zoom = QLabel("100%")
-        self.lbl_zoom.setMinimumWidth(40)
-        self.lbl_zoom.setAlignment(Qt.AlignCenter)
-
-        self.btn_zoom_out = QPushButton("🔍-")
-        self.btn_zoom_out.setToolTip("Zoom out (-)")
-        self.btn_zoom_out.clicked.connect(self.canvas.zoom_out)
-
-        self.btn_zoom_in = QPushButton("🔍+")
-        self.btn_zoom_in.setToolTip("Zoom in (+)")
-        self.btn_zoom_in.clicked.connect(self.canvas.zoom_in)
-
-        self.btn_zoom_reset = QPushButton("1:1")
-        self.btn_zoom_reset.setToolTip("Fit to window (0)")
-        self.btn_zoom_reset.clicked.connect(self.canvas.fit_to_view)
-
-        layout.addWidget(self.btn_zoom_out)
-        layout.addWidget(self.lbl_zoom)
-        layout.addWidget(self.btn_zoom_in)
-        layout.addWidget(self.btn_zoom_reset)
 
     def _add_separator(self, layout):
         line = QFrame()
@@ -2507,6 +2495,36 @@ class FKVideoPlayer(QMainWindow):
         self.btn_rec_load.setToolTip("Load actions session from JSON")
         self.btn_rec_load.clicked.connect(self.load_actions_json)
         layout.addWidget(self.btn_rec_load)
+
+        self._add_separator(layout)
+
+        self.btn_add_overlay = QPushButton("🖼️ Add Overlay...")
+        self.btn_add_overlay.setToolTip("Add image, GIF, or secondary video overlay (Ctrl+I)")
+        self.btn_add_overlay.clicked.connect(self.add_overlay_dialog)
+        layout.addWidget(self.btn_add_overlay)
+
+        self._add_separator(layout)
+
+        self.lbl_zoom = QLabel("100%")
+        self.lbl_zoom.setMinimumWidth(38)
+        self.lbl_zoom.setAlignment(Qt.AlignCenter)
+
+        self.btn_zoom_out = QPushButton("🔍-")
+        self.btn_zoom_out.setToolTip("Zoom out (-)")
+        self.btn_zoom_out.clicked.connect(self.canvas.zoom_out)
+
+        self.btn_zoom_in = QPushButton("🔍+")
+        self.btn_zoom_in.setToolTip("Zoom in (+)")
+        self.btn_zoom_in.clicked.connect(self.canvas.zoom_in)
+
+        self.btn_zoom_reset = QPushButton("1:1")
+        self.btn_zoom_reset.setToolTip("Fit to window (0)")
+        self.btn_zoom_reset.clicked.connect(self.canvas.fit_to_view)
+
+        layout.addWidget(self.btn_zoom_out)
+        layout.addWidget(self.lbl_zoom)
+        layout.addWidget(self.btn_zoom_in)
+        layout.addWidget(self.btn_zoom_reset)
 
         layout.addStretch(1)
 
@@ -3909,8 +3927,8 @@ class FKVideoPlayer(QMainWindow):
         # Help Menu
         self.menu_help = menubar.addMenu(tr('menu_help'))
         self.menu_help.addAction(tr('act_about'), self.open_about_dialog, QKeySequence("F1"))
+        self.menu_help.addAction(tr('act_welcome'), self.open_welcome_dialog)
         self.menu_help.addAction(tr('act_updates'), self.open_updates_dialog)
-        self.menu_help.addAction(tr('act_donate'), self.open_donate)
 
     def _refresh_recent_projects_menu(self):
         if not hasattr(self, 'menu_recent'):

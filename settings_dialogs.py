@@ -1181,7 +1181,7 @@ class AboutDialog(QDialog):
         lbl_desc.setStyleSheet("font-size: 13px; color: #C0C0D4; margin: 4px 0;")
         layout.addWidget(lbl_desc)
 
-        lbl_author = QLabel(f"{tr('about_author')} (furrykit)")
+        lbl_author = QLabel(tr('about_author'))
         lbl_author.setStyleSheet("font-size: 13px; color: #00E5FF; font-weight: bold;")
         lbl_author.setAlignment(Qt.AlignCenter)
         layout.addWidget(lbl_author)
@@ -1227,6 +1227,90 @@ class AboutDialog(QDialog):
         btn_close = QPushButton("Close")
         btn_close.clicked.connect(self.accept)
         layout.addWidget(btn_close)
+
+
+# =========================================================================
+# 6.5 Welcome & Donation Dialog
+# =========================================================================
+class WelcomeDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(tr('welcome_title'))
+        self.setStyleSheet(DIALOG_STYLE)
+        self.setFixedSize(540, 460)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        lbl_title = QLabel(tr('welcome_heading'))
+        lbl_title.setStyleSheet("font-size: 22px; font-weight: bold; color: #007AFF;")
+        lbl_title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(lbl_title)
+
+        lbl_desc = QLabel(tr('welcome_desc'))
+        lbl_desc.setWordWrap(True)
+        lbl_desc.setStyleSheet("font-size: 13px; color: #D0D0E2; line-height: 1.5; margin: 4px 6px;")
+        lbl_desc.setAlignment(Qt.AlignLeft)
+        layout.addWidget(lbl_desc)
+
+        # Support Section Box
+        box_sup = QGroupBox(tr('welcome_support_title'))
+        l_sup = QVBoxLayout(box_sup)
+        l_sup.setSpacing(8)
+
+        h_don = QHBoxLayout()
+        btn_dp = QPushButton("💸 DonatePay")
+        btn_dp.setObjectName("PrimaryBtn")
+        btn_dp.setStyleSheet("font-size: 13px; font-weight: bold; padding: 8px 16px;")
+        btn_dp.clicked.connect(lambda: webbrowser.open(DONATEPAY_URL))
+        h_don.addWidget(btn_dp)
+
+        btn_da = QPushButton("☕ DonationAlerts")
+        btn_da.setStyleSheet("background-color: #E85D04; color: #FFFFFF; font-size: 13px; font-weight: bold; border: 1px solid #DC2F02; padding: 8px 16px;")
+        btn_da.clicked.connect(lambda: webbrowser.open(DONATIONALERTS_URL))
+        h_don.addWidget(btn_da)
+        l_sup.addLayout(h_don)
+
+        h_social = QHBoxLayout()
+        btn_tg = QPushButton("💬 Telegram: @furrykit")
+        btn_tg.setStyleSheet("background-color: #229ED9; color: #FFFFFF; font-weight: bold; border: 1px solid #1E88BD; padding: 6px 12px;")
+        btn_tg.clicked.connect(lambda: webbrowser.open(TELEGRAM_URL))
+        h_social.addWidget(btn_tg)
+
+        btn_gh = QPushButton("🐙 GitHub: furrykit")
+        btn_gh.setStyleSheet("background-color: #24292E; color: #FFFFFF; font-weight: bold; border: 1px solid #3F4448; padding: 6px 12px;")
+        btn_gh.clicked.connect(lambda: webbrowser.open(GITHUB_URL))
+        h_social.addWidget(btn_gh)
+        l_sup.addLayout(h_social)
+
+        layout.addWidget(box_sup)
+
+        layout.addStretch()
+
+        # Don't show again checkbox & Start button
+        h_bot = QHBoxLayout()
+        self.check_dont_show = QCheckBox(tr('welcome_dont_show'))
+        from PyQt5.QtCore import QSettings
+        settings = QSettings("furrykit", "FKVideoPlayer")
+        dont_show = not settings.value("show_welcome", True, type=bool)
+        self.check_dont_show.setChecked(dont_show)
+        h_bot.addWidget(self.check_dont_show)
+
+        h_bot.addStretch()
+
+        btn_start = QPushButton(tr('welcome_start_btn'))
+        btn_start.setObjectName("PrimaryBtn")
+        btn_start.setStyleSheet("font-size: 13px; font-weight: bold; padding: 8px 24px;")
+        btn_start.clicked.connect(self._on_start_clicked)
+        h_bot.addWidget(btn_start)
+        layout.addLayout(h_bot)
+
+    def _on_start_clicked(self):
+        from PyQt5.QtCore import QSettings
+        settings = QSettings("furrykit", "FKVideoPlayer")
+        show_welcome = not self.check_dont_show.isChecked()
+        settings.setValue("show_welcome", show_welcome)
+        self.accept()
 
 
 # =========================================================================

@@ -44,7 +44,13 @@ STRINGS = {
         'act_export_presets': 'Export Presets Manager...',
         'act_about': 'About FKVideoPlayer',
         'act_updates': 'Check for Updates...',
-        'act_donate': 'Support & Donate...',
+        'act_welcome': 'Welcome & Support...',
+        'welcome_title': 'Welcome to FKVideoPlayer',
+        'welcome_heading': 'Welcome to FKVideoPlayer!',
+        'welcome_desc': 'FKVideoPlayer is 100% free and open-source software for video playback, screen annotation, live window capture, and actions recording.\n\nAll features are completely free with no limits, ads, or watermarks.\nIf FKVideoPlayer helps you in your creative work, streaming, or video editing, you can optionally support the author with a donation!',
+        'welcome_support_title': 'Support Creator:',
+        'welcome_dont_show': "Don't show this message on startup",
+        'welcome_start_btn': '🚀 Get Started',
 
         # Toolbar & Controls
         'btn_select': 'Select / Move Objects (V)',
@@ -176,7 +182,13 @@ STRINGS = {
         'act_export_presets': 'Управление пресетами экспорта...',
         'act_about': 'О программе FKVideoPlayer',
         'act_updates': 'Проверить обновления...',
-        'act_donate': 'Поддержать автора (Донат)...',
+        'act_welcome': 'Приветствие и поддержка...',
+        'welcome_title': 'Добро пожаловать в FKVideoPlayer',
+        'welcome_heading': 'Добро пожаловать в FKVideoPlayer!',
+        'welcome_desc': 'FKVideoPlayer — это полностью бесплатный плеер с открытым исходным кодом для просмотра видео, живого рисования, захвата окон и записи действий.\n\nВсе функции программы абсолютно бесплатны, без ограничений, рекламы и водяных знаков.\nЕсли плеер помогает вам в работе, стриминге или творчестве, вы можете добровольно поддержать автора донатом!',
+        'welcome_support_title': 'Поддержать автора:',
+        'welcome_dont_show': 'Больше не показывать при запуске',
+        'welcome_start_btn': '🚀 Начать работу',
 
         # Toolbar & Controls
         'btn_select': 'Выбор / Перемещение объектов (V)',
