@@ -214,6 +214,62 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         self.assertIn("#FFFFFF", blue_btn.styleSheet())
         print("[OK] Смена цвета и подсветка активного цвета в UI работают")
 
+    def test_10_speed_modes_and_shortcuts(self):
+        """Проверка расширенных режимов скорости и хоткеев <, >, R"""
+        combo = self.player.combo_speed
+        self.assertIn("0.05x", self.player.speed_presets)
+        self.assertIn("0.1x", self.player.speed_presets)
+        self.assertIn("0.25x", self.player.speed_presets)
+        self.assertIn("0.5x", self.player.speed_presets)
+        self.assertIn("1.0x", self.player.speed_presets)
+        self.assertIn("2.0x", self.player.speed_presets)
+        self.assertIn("4.0x", self.player.speed_presets)
+        self.assertIn("8.0x", self.player.speed_presets)
+        self.assertIn("10.0x", self.player.speed_presets)
+
+        # Сброс на 1.0x
+        self.player.reset_speed()
+        self.assertEqual(combo.currentText(), "1.0x")
+        self.assertEqual(self.player.playback_speed, 1.0)
+        self.assertEqual(self.player.frames_per_tick, 1)
+
+        # Увеличение скорости (>)
+        self.player.increase_speed()
+        self.assertEqual(combo.currentText(), "1.25x")
+        self.assertEqual(self.player.playback_speed, 1.25)
+
+        # Уменьшение скорости (<)
+        self.player.decrease_speed()
+        self.assertEqual(combo.currentText(), "1.0x")
+
+        # Замедление (<)
+        self.player.decrease_speed()
+        self.assertEqual(combo.currentText(), "0.75x")
+        self.assertEqual(self.player.playback_speed, 0.75)
+
+        # Проверка экстремальной скорости (8.0x) - мульти-шаг кадров
+        combo.setCurrentText("8.0x")
+        self.assertEqual(self.player.playback_speed, 8.0)
+        self.assertGreater(self.player.frames_per_tick, 1)
+        print(f"[OK] Режимы скорости (0.05x - 10.0x) и горячие клавиши работают, multi-step: {self.player.frames_per_tick}")
+
+    def test_11_empty_player_by_default(self):
+        """Проверка инициализации плеера без видео по умолчанию"""
+        empty_player = VideoPlayerWindow(None)
+        empty_player.show()
+        self.assertIsNone(empty_player.cap)
+        self.assertEqual(empty_player.video_path, "")
+        self.assertEqual(empty_player.total_frames, 0)
+        self.assertEqual(empty_player.current_frame_idx, 0)
+        self.assertIsNone(empty_player.canvas.current_qimage)
+        # Вызовы на пустом плеере безопасны и не вызывают исключений
+        empty_player.play()
+        empty_player.pause()
+        empty_player.step_frame(1)
+        empty_player.seek_seconds(5.0)
+        empty_player.close()
+        print("[OK] Плеер без видео по дефолту запускается чисто и безопасно")
+
 
 if __name__ == "__main__":
     unittest.main()

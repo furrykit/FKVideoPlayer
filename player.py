@@ -543,6 +543,7 @@ class VideoPlayerWindow(QMainWindow):
         self.is_playing = False
         self.is_looping = True
         self.playback_speed = 1.0
+        self.frames_per_tick = 1
 
         # Таймер воспроизведения
         self.play_timer = QTimer(self)
@@ -775,11 +776,17 @@ class VideoPlayerWindow(QMainWindow):
         self.btn_loop.clicked.connect(self._toggle_loop)
         ctrl_layout.addWidget(self.btn_loop)
 
-        # Скорость воспроизведения
+        # Скорость воспроизведения с расширенными режимами
         ctrl_layout.addWidget(QLabel("Скорость:"))
         self.combo_speed = QComboBox()
-        self.combo_speed.addItems(["0.25x", "0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x"])
+        self.speed_presets = [
+            "0.05x", "0.1x", "0.2x", "0.25x", "0.33x", "0.5x", "0.75x",
+            "1.0x",
+            "1.25x", "1.5x", "1.75x", "2.0x", "2.5x", "3.0x", "4.0x", "5.0x", "8.0x", "10.0x"
+        ]
+        self.combo_speed.addItems(self.speed_presets)
         self.combo_speed.setCurrentText("1.0x")
+        self.combo_speed.setToolTip("Скорость видео (Клавиши < и > для переключения, R для сброса на 1.0x)")
         self.combo_speed.currentTextChanged.connect(self._on_speed_changed)
         ctrl_layout.addWidget(self.combo_speed)
 
@@ -825,6 +832,13 @@ class VideoPlayerWindow(QMainWindow):
         # Толщина кисти клавишами [ и ]
         QShortcut(QKeySequence("["), self, lambda: self.spin_width.setValue(self.spin_width.value() - 1))
         QShortcut(QKeySequence("]"), self, lambda: self.spin_width.setValue(self.spin_width.value() + 1))
+
+        # Скорость воспроизведения (< замедлить, > ускорить, R сброс)
+        QShortcut(QKeySequence("<"), self, self.decrease_speed)
+        QShortcut(QKeySequence(">"), self, self.increase_speed)
+        QShortcut(QKeySequence("Shift+,"), self, self.decrease_speed)
+        QShortcut(QKeySequence("Shift+."), self, self.increase_speed)
+        QShortcut(QKeySequence("R"), self, self.reset_speed)
 
         # Зум
         QShortcut(QKeySequence("+"), self, self.canvas.zoom_in)
@@ -962,9 +976,8 @@ class VideoPlayerWindow(QMainWindow):
         if self.current_frame_idx >= self.total_frames - 1:
             self._seek_to_frame(0)
 
-        interval = int(1000.0 / (self.fps * self.playback_speed))
-        interval = max(5, interval)
-        self.play_timer.start(interval)
+        self._update_timer_interval()
+        self.play_timer.start()
         self.is_playing = True
         self.btn_play_pause.setText("⏸ Пауза")
 
@@ -973,35 +986,56 @@ class VideoPlayerWindow(QMainWindow):
         self.is_playing = False
         self.btn_play_pause.setText("▶ Пуск")
 
+    def _update_timer_interval(self):
+        """
+        Адаптивный расчет интервала таймера и шага кадров:
+        для замедления и обычных скоростей (до 60 кадров/сек) шаг = 1 кадр;
+        для экстремального ускорения (до 10x) таймер держит комфортные 60 FPS,
+        шагая на нужное число кадров за раз.
+        """
+        target_fps = max(0.1, self.fps * self.playback_speed)
+        if target_fps <= 60.0:
+            interval = int(round(1000.0 / target_fps))
+            self.frames_per_tick = 1
+        else:
+            interval = 16  # ~60 Гц
+            self.frames_per_tick = max(1, int(round(target_fps / 60.0)))
+
+        self.play_timer.setInterval(max(2, interval))
+
     def _on_play_tick(self):
         if self.cap is None or not self.cap.isOpened():
             self.pause()
             return
 
-        next_frame = self.current_frame_idx + 1
+        step = getattr(self, 'frames_per_tick', 1)
+        next_frame = self.current_frame_idx + step
         if next_frame >= self.total_frames:
             if self.is_looping:
-                next_frame = 0
                 self._seek_to_frame(0)
                 return
             else:
+                self._seek_to_frame(self.total_frames - 1)
                 self.pause()
                 return
 
-        ret, frame = self.cap.read()
-        if ret and frame is not None:
-            self.current_frame_idx = next_frame
-            self.canvas.set_frame(frame)
-            self._update_time_label()
-            if not self.timeline_slider.is_dragging:
-                self.timeline_slider.blockSignals(True)
-                self.timeline_slider.setValue(next_frame)
-                self.timeline_slider.blockSignals(False)
+        if step > 1:
+            self._seek_to_frame(next_frame)
         else:
-            if self.is_looping:
-                self._seek_to_frame(0)
+            ret, frame = self.cap.read()
+            if ret and frame is not None:
+                self.current_frame_idx = next_frame
+                self.canvas.set_frame(frame)
+                self._update_time_label()
+                if not self.timeline_slider.is_dragging:
+                    self.timeline_slider.blockSignals(True)
+                    self.timeline_slider.setValue(next_frame)
+                    self.timeline_slider.blockSignals(False)
             else:
-                self.pause()
+                if self.is_looping:
+                    self._seek_to_frame(0)
+                else:
+                    self.pause()
 
     def step_frame(self, delta):
         """Покадровый переход вперед (+1) или назад (-1)"""
@@ -1021,11 +1055,27 @@ class VideoPlayerWindow(QMainWindow):
         speed_str = text.replace("x", "")
         try:
             self.playback_speed = float(speed_str)
-            if self.is_playing:
-                interval = int(1000.0 / (self.fps * self.playback_speed))
-                self.play_timer.setInterval(max(5, interval))
+            self._update_timer_interval()
         except ValueError:
             pass
+
+    def increase_speed(self):
+        """Увеличить скорость на 1 градацию вверх (>)"""
+        idx = self.combo_speed.currentIndex()
+        if idx < self.combo_speed.count() - 1:
+            self.combo_speed.setCurrentIndex(idx + 1)
+
+    def decrease_speed(self):
+        """Уменьшить скорость на 1 градацию вниз (<)"""
+        idx = self.combo_speed.currentIndex()
+        if idx > 0:
+            self.combo_speed.setCurrentIndex(idx - 1)
+
+    def reset_speed(self):
+        """Сбросить скорость на 1.0x (R)"""
+        idx = self.combo_speed.findText("1.0x")
+        if idx >= 0:
+            self.combo_speed.setCurrentIndex(idx)
 
     # --- Обработчики таймлайна ---
 
@@ -1157,8 +1207,6 @@ def main():
     initial_file = None
     if len(sys.argv) > 1 and os.path.exists(sys.argv[1]):
         initial_file = sys.argv[1]
-    elif os.path.exists("swapped_preview_test.mp4"):
-        initial_file = "swapped_preview_test.mp4"
 
     player = VideoPlayerWindow(initial_file)
     player.show()
