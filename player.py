@@ -9,7 +9,7 @@ import av
 import cv2
 import numpy as np
 from PIL import Image, ImageSequence
-from PyQt5.QtCore import Qt, QTimer, QPointF, QRectF, pyqtSignal, QPoint, QUrl, QThread
+from PyQt5.QtCore import Qt, QTimer, QPointF, QRectF, pyqtSignal, QPoint, QUrl, QThread, QObject
 from PyQt5.QtGui import (
     QImage, QPixmap, QPainter, QPen, QColor, QBrush, QCursor,
     QFont, QIcon, QKeySequence, QPainterPath
@@ -18,7 +18,8 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QSlider, QLabel, QFileDialog, QColorDialog,
     QComboBox, QSpinBox, QFrame, QShortcut, QMessageBox, QToolTip,
-    QProgressDialog, QScrollArea, QMenu, QAction, QSizePolicy
+    QProgressDialog, QScrollArea, QMenu, QAction, QSizePolicy,
+    QTabWidget, QToolButton
 )
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 
@@ -1698,6 +1699,100 @@ class ExportVideoWorker(QThread):
             self.finished.emit(True, self.output_path)
 
 
+class ProjectSession(QObject):
+    def __init__(self, player, name="Untitled", project_type="empty"):
+        super().__init__(player)
+        self.player = player
+        self.name = name
+        self.project_type = project_type
+
+        self.cap = None
+        self.video_path = ""
+        self.fps = 24.0
+        self.total_frames = 0
+        self.current_frame_idx = 0
+        self.is_playing = False
+        self.is_looping = True
+        self.playback_speed = 1.0
+        self.frames_per_tick = 1
+        self.has_audio = False
+        self.temp_audio_path = None
+        self.frame_cache = collections.OrderedDict()
+        self._cap_pos = -1
+
+        self.canvas = VideoCanvas(player)
+        self.recorder = ActionRecorder(player)
+        self.canvas.recorder = self.recorder
+
+        self.window_capture_worker = None
+        self.is_capturing_window = False
+        self.captured_window_hwnd = None
+        self.captured_window_title = ""
+
+    def is_empty(self) -> bool:
+        if self.cap is not None or self.video_path:
+            return False
+        if self.is_capturing_window or self.window_capture_worker is not None:
+            return False
+        if len(self.canvas.strokes) > 0 or len(self.canvas.overlays) > 0:
+            return False
+        if self.recorder.is_active() or len(self.recorder.events) > 0:
+            return False
+        if self.canvas.video_width > 0 or self.canvas.video_height > 0:
+            return False
+        return True
+
+    def has_unsaved_changes(self) -> bool:
+        if len(self.canvas.strokes) > 0 or len(self.canvas.overlays) > 0:
+            return True
+        if self.recorder.is_active() or len(self.recorder.events) > 0:
+            return True
+        return False
+
+    def close(self):
+        self.is_playing = False
+        if self.window_capture_worker:
+            try:
+                self.window_capture_worker.stop()
+            except Exception:
+                pass
+            self.window_capture_worker = None
+        self.is_capturing_window = False
+
+        if self.cap is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+
+        if self.recorder and self.recorder.is_active():
+            try:
+                self.recorder.stop()
+            except Exception:
+                pass
+        if self.recorder:
+            self.recorder.events.clear()
+
+        if self.temp_audio_path and os.path.exists(self.temp_audio_path):
+            try:
+                os.remove(self.temp_audio_path)
+            except Exception:
+                pass
+            self.temp_audio_path = None
+
+        self.frame_cache.clear()
+        for ov in self.canvas.overlays:
+            try:
+                ov.close()
+            except Exception:
+                pass
+        self.canvas.overlays.clear()
+        self.canvas.strokes.clear()
+        self.canvas.undo_stack.clear()
+        self.canvas.current_qimage = None
+
+
 class FKVideoPlayer(QMainWindow):
     MAX_CACHE_FRAMES = 120
 
@@ -1712,25 +1807,15 @@ class FKVideoPlayer(QMainWindow):
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
-        self.cap = None
-        self.video_path = ""
-        self.fps = 24.0
-        self.total_frames = 0
-        self.current_frame_idx = 0
-        self.is_playing = False
-        self.is_looping = True
-        self.playback_speed = 1.0
-        self.frames_per_tick = 1
-        self.has_audio = False
-        self.temp_audio_path = None
+        self.projects = []
+        self._fallback_canvas = VideoCanvas(self)
+        self._fallback_recorder = ActionRecorder(self)
+        self._fallback_cache = collections.OrderedDict()
 
         self.audio_player = QMediaPlayer(self, QMediaPlayer.LowLatency)
         self.current_volume = 80
         self.is_muted = False
         self.audio_player.setVolume(self.current_volume)
-
-        self.frame_cache = collections.OrderedDict()
-        self._cap_pos = -1
 
         self._pending_seek_frame = None
         self._seek_timer = QTimer(self)
@@ -1748,7 +1833,6 @@ class FKVideoPlayer(QMainWindow):
         self.play_timer = QTimer(self)
         self.play_timer.timeout.connect(self._on_play_tick)
 
-        self.recorder = ActionRecorder(self)
         self.rec_update_timer = QTimer(self)
         self.rec_update_timer.timeout.connect(self._on_rec_update_timer)
         self.export_worker = None
@@ -1762,10 +1846,6 @@ class FKVideoPlayer(QMainWindow):
         self.last_mic_wav = None
         self.selected_mic_device = None
 
-        self.window_capture_worker = None
-        self.is_capturing_window = False
-        self.captured_window_hwnd = None
-        self.captured_window_title = ""
         self.temp_capture_writer = None
         self.temp_capture_video_path = None
 
@@ -1773,8 +1853,217 @@ class FKVideoPlayer(QMainWindow):
         self._apply_dark_theme()
         self._setup_shortcuts()
 
+        self.new_project_tab(name="Project 1", project_type="empty")
+
         if initial_video_path and os.path.exists(initial_video_path):
             self.load_video(initial_video_path)
+
+    @property
+    def active_project(self):
+        if hasattr(self, 'projects') and self.projects:
+            idx = self.project_tabs.currentIndex() if hasattr(self, 'project_tabs') else 0
+            if 0 <= idx < len(self.projects):
+                return self.projects[idx]
+            if len(self.projects) > 0:
+                return self.projects[0]
+        return getattr(self, '_fallback_project', None)
+
+    @property
+    def canvas(self):
+        proj = self.active_project
+        return proj.canvas if proj else self._fallback_canvas
+
+    @property
+    def recorder(self):
+        proj = self.active_project
+        return proj.recorder if proj else self._fallback_recorder
+
+    @recorder.setter
+    def recorder(self, val):
+        proj = self.active_project
+        if proj:
+            proj.recorder = val
+
+    @property
+    def cap(self):
+        proj = self.active_project
+        return proj.cap if proj else None
+
+    @cap.setter
+    def cap(self, val):
+        proj = self.active_project
+        if proj:
+            proj.cap = val
+
+    @property
+    def video_path(self):
+        proj = self.active_project
+        return proj.video_path if proj else ""
+
+    @video_path.setter
+    def video_path(self, val):
+        proj = self.active_project
+        if proj:
+            proj.video_path = val
+
+    @property
+    def fps(self):
+        proj = self.active_project
+        return proj.fps if proj else 24.0
+
+    @fps.setter
+    def fps(self, val):
+        proj = self.active_project
+        if proj:
+            proj.fps = val
+
+    @property
+    def total_frames(self):
+        proj = self.active_project
+        return proj.total_frames if proj else 0
+
+    @total_frames.setter
+    def total_frames(self, val):
+        proj = self.active_project
+        if proj:
+            proj.total_frames = val
+
+    @property
+    def current_frame_idx(self):
+        proj = self.active_project
+        return proj.current_frame_idx if proj else 0
+
+    @current_frame_idx.setter
+    def current_frame_idx(self, val):
+        proj = self.active_project
+        if proj:
+            proj.current_frame_idx = val
+
+    @property
+    def is_playing(self):
+        proj = self.active_project
+        return proj.is_playing if proj else False
+
+    @is_playing.setter
+    def is_playing(self, val):
+        proj = self.active_project
+        if proj:
+            proj.is_playing = val
+
+    @property
+    def is_looping(self):
+        proj = self.active_project
+        return proj.is_looping if proj else True
+
+    @is_looping.setter
+    def is_looping(self, val):
+        proj = self.active_project
+        if proj:
+            proj.is_looping = val
+
+    @property
+    def playback_speed(self):
+        proj = self.active_project
+        return proj.playback_speed if proj else 1.0
+
+    @playback_speed.setter
+    def playback_speed(self, val):
+        proj = self.active_project
+        if proj:
+            proj.playback_speed = val
+
+    @property
+    def frames_per_tick(self):
+        proj = self.active_project
+        return proj.frames_per_tick if proj else 1
+
+    @frames_per_tick.setter
+    def frames_per_tick(self, val):
+        proj = self.active_project
+        if proj:
+            proj.frames_per_tick = val
+
+    @property
+    def has_audio(self):
+        proj = self.active_project
+        return proj.has_audio if proj else False
+
+    @has_audio.setter
+    def has_audio(self, val):
+        proj = self.active_project
+        if proj:
+            proj.has_audio = val
+
+    @property
+    def temp_audio_path(self):
+        proj = self.active_project
+        return proj.temp_audio_path if proj else None
+
+    @temp_audio_path.setter
+    def temp_audio_path(self, val):
+        proj = self.active_project
+        if proj:
+            proj.temp_audio_path = val
+
+    @property
+    def frame_cache(self):
+        proj = self.active_project
+        return proj.frame_cache if proj else self._fallback_cache
+
+    @property
+    def _cap_pos(self):
+        proj = self.active_project
+        return proj._cap_pos if proj else -1
+
+    @_cap_pos.setter
+    def _cap_pos(self, val):
+        proj = self.active_project
+        if proj:
+            proj._cap_pos = val
+
+    @property
+    def window_capture_worker(self):
+        proj = self.active_project
+        return proj.window_capture_worker if proj else None
+
+    @window_capture_worker.setter
+    def window_capture_worker(self, val):
+        proj = self.active_project
+        if proj:
+            proj.window_capture_worker = val
+
+    @property
+    def is_capturing_window(self):
+        proj = self.active_project
+        return proj.is_capturing_window if proj else False
+
+    @is_capturing_window.setter
+    def is_capturing_window(self, val):
+        proj = self.active_project
+        if proj:
+            proj.is_capturing_window = val
+
+    @property
+    def captured_window_hwnd(self):
+        proj = self.active_project
+        return proj.captured_window_hwnd if proj else None
+
+    @captured_window_hwnd.setter
+    def captured_window_hwnd(self, val):
+        proj = self.active_project
+        if proj:
+            proj.captured_window_hwnd = val
+
+    @property
+    def captured_window_title(self):
+        proj = self.active_project
+        return proj.captured_window_title if proj else ""
+
+    @captured_window_title.setter
+    def captured_window_title(self, val):
+        proj = self.active_project
+        if proj:
+            proj.captured_window_title = val
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -1790,16 +2079,43 @@ class FKVideoPlayer(QMainWindow):
         main_layout.setContentsMargins(6, 6, 6, 6)
         main_layout.setSpacing(4)
 
-        self.canvas = VideoCanvas(self)
-        self.canvas.recorder = self.recorder
-        self.canvas.zoom_changed.connect(self._on_canvas_zoom_changed)
-        self.canvas.drawing_changed.connect(self._on_drawing_changed)
+        self.project_tabs = QTabWidget(self)
+        self.project_tabs.setObjectName("ProjectTabs")
+        self.project_tabs.setTabsClosable(True)
+        self.project_tabs.setMovable(True)
+        self.project_tabs.setDocumentMode(True)
+        self.project_tabs.tabCloseRequested.connect(self._on_tab_close_requested)
+        self.project_tabs.currentChanged.connect(self._on_tab_changed)
+
+        btn_add_tab = QToolButton(self.project_tabs)
+        btn_add_tab.setText("+")
+        btn_add_tab.setToolTip("New Project Tab (Ctrl+T)")
+        btn_add_tab.setCursor(Qt.PointingHandCursor)
+        btn_add_tab.setStyleSheet("""
+            QToolButton {
+                background-color: #1A1A24;
+                color: #00E5FF;
+                font-size: 15px;
+                font-weight: bold;
+                border: 1px solid #2C2C3E;
+                border-radius: 4px;
+                padding: 2px 8px;
+                margin: 2px 4px;
+            }
+            QToolButton:hover {
+                background-color: #007AFF;
+                color: #FFFFFF;
+                border-color: #007AFF;
+            }
+        """)
+        btn_add_tab.clicked.connect(lambda: self.new_project_tab())
+        self.project_tabs.setCornerWidget(btn_add_tab, Qt.TopRightCorner)
 
         self._create_top_toolbar()
         self._create_recording_bar()
         main_layout.addWidget(self.top_toolbar)
         main_layout.addWidget(self.recording_bar)
-        main_layout.addWidget(self.canvas, stretch=1)
+        main_layout.addWidget(self.project_tabs, stretch=1)
 
         bottom_panel = self._create_bottom_controls()
         main_layout.addWidget(bottom_panel)
@@ -2187,8 +2503,13 @@ class FKVideoPlayer(QMainWindow):
         reg_sc(cfg_hotkeys.get("open_video", "Ctrl+O"), self.open_file_dialog)
         reg_sc("O", self.open_file_dialog)
         reg_sc(cfg_hotkeys.get("new_canvas", "Ctrl+N"), self.open_new_canvas_dialog)
-        reg_sc(cfg_hotkeys.get("capture_window", "Ctrl+W"), self.open_window_capture_dialog)
+        reg_sc(cfg_hotkeys.get("capture_window", "Ctrl+Shift+W"), self.open_window_capture_dialog)
         reg_sc("Ctrl+I", self.add_overlay_dialog)
+
+        reg_sc("Ctrl+T", lambda: self.new_project_tab())
+        reg_sc("Ctrl+W", self.close_current_tab)
+        reg_sc("Ctrl+Tab", self.next_project_tab)
+        reg_sc("Ctrl+Shift+Tab", self.prev_project_tab)
 
         reg_sc(cfg_hotkeys.get("record_toggle", "Ctrl+R"), self._shortcut_toggle_record)
         reg_sc("Ctrl+Shift+P", self.pause_actions_record)
@@ -2198,6 +2519,135 @@ class FKVideoPlayer(QMainWindow):
         reg_sc("PageDown", lambda: self.send_overlay_backward(self.canvas.selected_overlay))
         reg_sc("Shift+PageUp", lambda: self.bring_overlay_to_front(self.canvas.selected_overlay))
         reg_sc("Shift+PageDown", lambda: self.send_overlay_to_back(self.canvas.selected_overlay))
+
+    def new_project_tab(self, name=None, project_type="empty") -> ProjectSession:
+        if not name:
+            count = len(self.projects) + 1
+            name = f"Project {count}"
+
+        proj = ProjectSession(self, name=name, project_type=project_type)
+        self.projects.append(proj)
+        proj.canvas.zoom_changed.connect(self._on_canvas_zoom_changed)
+        proj.canvas.drawing_changed.connect(self._on_drawing_changed)
+
+        idx = self.project_tabs.addTab(proj.canvas, name)
+        self.project_tabs.setCurrentIndex(idx)
+        return proj
+
+    def close_current_tab(self):
+        idx = self.project_tabs.currentIndex()
+        if idx >= 0:
+            self._on_tab_close_requested(idx)
+
+    def next_project_tab(self):
+        if not hasattr(self, 'project_tabs') or self.project_tabs.count() <= 1:
+            return
+        idx = (self.project_tabs.currentIndex() + 1) % self.project_tabs.count()
+        self.project_tabs.setCurrentIndex(idx)
+
+    def prev_project_tab(self):
+        if not hasattr(self, 'project_tabs') or self.project_tabs.count() <= 1:
+            return
+        idx = (self.project_tabs.currentIndex() - 1) % self.project_tabs.count()
+        self.project_tabs.setCurrentIndex(idx)
+
+    def _on_tab_changed(self, index: int):
+        if not (0 <= index < len(self.projects)):
+            return
+
+        proj = self.projects[index]
+
+        if self.play_timer.isActive():
+            self.play_timer.stop()
+
+        self.timeline_slider.blockSignals(True)
+        self.timeline_slider.fps = proj.fps
+        self.timeline_slider.setRange(0, max(0, proj.total_frames - 1))
+        self.timeline_slider.setValue(proj.current_frame_idx)
+        self.timeline_slider.blockSignals(False)
+
+        if proj.has_audio and proj.temp_audio_path and os.path.exists(proj.temp_audio_path):
+            media_url = QUrl.fromLocalFile(proj.temp_audio_path)
+            self.audio_player.setMedia(QMediaContent(media_url))
+            self.audio_player.setVolume(self.current_volume if not self.is_muted else 0)
+            target_ms = int((proj.current_frame_idx / max(1.0, proj.fps)) * 1000)
+            self.audio_player.setPosition(target_ms)
+            if proj.is_playing:
+                self.audio_player.play()
+            else:
+                self.audio_player.pause()
+        else:
+            self.audio_player.setMedia(QMediaContent())
+
+        if proj.is_playing:
+            self.btn_play_pause.setText("❚❚ Pause")
+            self._update_timer_interval()
+            self.play_timer.start()
+        else:
+            self.btn_play_pause.setText("▶ Play")
+
+        self.btn_loop.setChecked(proj.is_looping)
+        self.combo_speed.blockSignals(True)
+        spd_str = f"{proj.playback_speed}x"
+        spd_idx = self.combo_speed.findText(spd_str)
+        if spd_idx >= 0:
+            self.combo_speed.setCurrentIndex(spd_idx)
+        else:
+            self.combo_speed.setCurrentText(spd_str)
+        self.combo_speed.blockSignals(False)
+
+        self._select_tool(proj.canvas.active_tool)
+        self.spin_width.setValue(int(proj.canvas.pen_width))
+        self._update_color_buttons_state(proj.canvas.pen_color.name())
+
+        if proj.recorder.is_recording():
+            self.lbl_rec_status.setText("● REC")
+            self.lbl_rec_status.setStyleSheet("color: #FF3B30; font-weight: bold; font-size: 11px;")
+            self.btn_rec_start.setEnabled(False)
+            self.btn_rec_pause.setEnabled(True)
+            self.btn_rec_stop.setEnabled(True)
+        elif proj.recorder.is_paused():
+            self.lbl_rec_status.setText("❚❚ PAUSED")
+            self.lbl_rec_status.setStyleSheet("color: #FFCC00; font-weight: bold; font-size: 11px;")
+            self.btn_rec_start.setEnabled(False)
+            self.btn_rec_pause.setEnabled(True)
+            self.btn_rec_stop.setEnabled(True)
+        else:
+            self.lbl_rec_status.setText("● Ready")
+            self.lbl_rec_status.setStyleSheet("color: #7E7E94; font-size: 11px;")
+            self.btn_rec_start.setEnabled(True)
+            self.btn_rec_pause.setEnabled(False)
+            self.btn_rec_stop.setEnabled(False)
+
+        has_events = len(proj.recorder.events) > 0 and proj.recorder.elapsed_time > 0.05
+        self.btn_rec_export.setEnabled(has_events)
+        self.btn_rec_save.setEnabled(has_events)
+
+        self._update_time_label()
+        self.setWindowTitle(f"FKVideoPlayer — {proj.name}")
+        proj.canvas.update()
+
+    def _on_tab_close_requested(self, index: int):
+        if not (0 <= index < len(self.projects)):
+            return
+
+        proj = self.projects[index]
+        if not self.prompt_unsaved_changes(project=proj):
+            return
+
+        if proj.is_playing:
+            proj.is_playing = False
+            if self.active_project == proj:
+                self.play_timer.stop()
+                self.audio_player.pause()
+                self.btn_play_pause.setText("▶ Play")
+
+        proj.close()
+        self.projects.pop(index)
+        self.project_tabs.removeTab(index)
+
+        if len(self.projects) == 0:
+            self.new_project_tab(name="Project 1", project_type="empty")
 
     def delete_selected_overlay(self):
         if self.canvas.selected_overlay:
@@ -2431,7 +2881,10 @@ class FKVideoPlayer(QMainWindow):
         if file_path:
             self.load_video(file_path)
 
-    def load_video(self, file_path):
+    def load_video(self, file_path, in_new_tab=None):
+        if in_new_tab or (in_new_tab is None and self.active_project and not self.active_project.is_empty()):
+            self.new_project_tab(name=os.path.basename(file_path), project_type="video")
+
         if self.cap is not None:
             self.cap.release()
             self.pause()
@@ -2486,12 +2939,21 @@ class FKVideoPlayer(QMainWindow):
         self.canvas.strokes.clear()
         self.canvas.undo_stack.clear()
 
+        tab_name = os.path.basename(file_path)
+        if self.active_project:
+            self.active_project.name = tab_name
+            self.active_project.project_type = 'video'
+        if hasattr(self, 'project_tabs'):
+            cur_idx = self.project_tabs.currentIndex()
+            if cur_idx >= 0:
+                self.project_tabs.setTabText(cur_idx, tab_name)
+
         self._seek_to_frame(0)
-        self.setWindowTitle(f"FKVideoPlayer — {os.path.basename(file_path)}")
+        self.setWindowTitle(f"FKVideoPlayer — {tab_name}")
         self._stop_window_capture()
         if self.cap:
             ProjectManager.instance().add_project(
-                'video', os.path.basename(file_path), file_path,
+                'video', tab_name, file_path,
                 int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             )
             self._refresh_recent_projects_menu()
@@ -2983,6 +3445,9 @@ class FKVideoPlayer(QMainWindow):
             self.create_blank_canvas(w, h, bg_hex, fps)
 
     def create_blank_canvas(self, width=1920, height=1080, bg_hex="#14141A", fps=30.0):
+        if self.active_project and not self.active_project.is_empty():
+            self.new_project_tab(name=f"Canvas {width}x{height}", project_type="blank")
+
         self._stop_window_capture()
         if self.cap is not None:
             self.cap.release()
@@ -2991,13 +3456,22 @@ class FKVideoPlayer(QMainWindow):
         self.fps = fps
         self.total_frames = int(fps * 3600) # 1 hour virtual timeline
         self.current_frame_idx = 0
+        tab_name = f"Canvas {width}x{height}"
+        if self.active_project:
+            self.active_project.name = tab_name
+            self.active_project.project_type = 'blank'
+        if hasattr(self, 'project_tabs'):
+            cur_idx = self.project_tabs.currentIndex()
+            if cur_idx >= 0:
+                self.project_tabs.setTabText(cur_idx, tab_name)
+
         self.canvas.set_blank_canvas(width, height, bg_hex)
         self.timeline_slider.setRange(0, self.total_frames - 1)
         self.timeline_slider.setValue(0)
-        self.setWindowTitle(f"FKVideoPlayer — Canvas {width}x{height}")
+        self.setWindowTitle(f"FKVideoPlayer — {tab_name}")
         if hasattr(self, 'lbl_time_info'):
             self.lbl_time_info.setText(f"{width}x{height} | Blank Canvas | {fps:.0f} FPS")
-        ProjectManager.instance().add_project('blank', f'Canvas {width}x{height}', f'{width}x{height}', width, height)
+        ProjectManager.instance().add_project('blank', tab_name, f'{width}x{height}', width, height)
         self._refresh_recent_projects_menu()
 
     def open_window_capture_dialog(self):
@@ -3006,6 +3480,9 @@ class FKVideoPlayer(QMainWindow):
             self.start_window_capture(dlg.selected_hwnd, dlg.selected_title)
 
     def start_window_capture(self, hwnd: int, title: str):
+        if self.active_project and not self.active_project.is_empty():
+            self.new_project_tab(name=f"Stream: {title[:16]}", project_type="window")
+
         self._stop_window_capture()
         if self.cap is not None:
             self.cap.release()
@@ -3014,6 +3491,15 @@ class FKVideoPlayer(QMainWindow):
         self.is_capturing_window = True
         self.captured_window_hwnd = hwnd
         self.captured_window_title = title
+        tab_name = f"Stream: {title[:16]}"
+        if self.active_project:
+            self.active_project.name = tab_name
+            self.active_project.project_type = 'window'
+        if hasattr(self, 'project_tabs'):
+            cur_idx = self.project_tabs.currentIndex()
+            if cur_idx >= 0:
+                self.project_tabs.setTabText(cur_idx, tab_name)
+
         self.setWindowTitle(f"FKVideoPlayer — Live Capture: {title}")
         if hasattr(self, 'lbl_time_info'):
             self.lbl_time_info.setText(f"Live Window: {title}")
@@ -3072,23 +3558,20 @@ class FKVideoPlayer(QMainWindow):
         webbrowser.open(DONATEPAY_URL)
 
     def has_unsaved_changes(self) -> bool:
-        if hasattr(self, 'canvas') and self.canvas:
-            if len(self.canvas.strokes) > 0 or len(self.canvas.overlays) > 0:
-                return True
-        if hasattr(self, 'recorder') and self.recorder:
-            if self.recorder.is_active() or len(self.recorder.events) > 0:
-                return True
+        if self.active_project:
+            return self.active_project.has_unsaved_changes()
         return False
 
-    def prompt_unsaved_changes(self) -> bool:
-        if not self.has_unsaved_changes():
+    def prompt_unsaved_changes(self, project=None) -> bool:
+        target = project if project is not None else self.active_project
+        if target is None or not target.has_unsaved_changes():
             return True
         if os.environ.get("QT_QPA_PLATFORM") == "offscreen" or getattr(self, '_suppress_unsaved_prompt', False):
             return True
 
         msg = QMessageBox(self)
         msg.setWindowTitle(tr('prompt_unsaved_title'))
-        msg.setText(tr('prompt_unsaved_text'))
+        msg.setText(f"{tr('prompt_unsaved_text')}\n({target.name})")
         msg.setIcon(QMessageBox.Question)
         btn_save = msg.addButton(tr('btn_export_save'), QMessageBox.AcceptRole)
         btn_save.setStyleSheet("background-color: #007AFF; color: #FFFFFF; font-weight: bold;")
@@ -3106,52 +3589,19 @@ class FKVideoPlayer(QMainWindow):
             return False
 
     def close_project(self):
-        if not self.prompt_unsaved_changes():
-            return
-
-        self._stop_window_capture()
-        if self.is_playing:
-            self.toggle_play_pause()
-
-        if self.cap is not None:
-            self.cap.release()
-            self.cap = None
-
-        self.video_path = ""
-        self.total_frames = 0
-        self.current_frame_idx = 0
-        if hasattr(self, 'recorder') and self.recorder:
-            if self.recorder.is_active():
-                self.recorder.stop()
-            self.recorder.events.clear()
-
-        self.canvas.strokes.clear()
-        self.canvas.undo_stack.clear()
-        for ov in self.canvas.overlays:
-            ov.close()
-        self.canvas.overlays.clear()
-        self.canvas.selected_overlay = None
-        self.canvas.current_qimage = None
-        self.canvas.video_width = 0
-        self.canvas.video_height = 0
-
-        self.timeline_slider.setRange(0, 0)
-        self.timeline_slider.setValue(0)
-        self.setWindowTitle("FKVideoPlayer")
-        if hasattr(self, 'lbl_time_info'):
-            self.lbl_time_info.setText("00:00.00 / 00:00.00  |  Frame: 0 / 0  (0.0 FPS)")
-        if hasattr(self, 'lbl_rec_status'):
-            self.lbl_rec_status.setText("● Project closed")
-        self.canvas.update()
+        idx = self.project_tabs.currentIndex()
+        if idx >= 0:
+            self._on_tab_close_requested(idx)
 
     def closeEvent(self, event):
-        if not self.prompt_unsaved_changes():
-            event.ignore()
-            return
-        self._stop_window_capture()
-        if self.cap is not None:
-            self.cap.release()
-            self.cap = None
+        for i, proj in enumerate(list(self.projects)):
+            if proj.has_unsaved_changes():
+                self.project_tabs.setCurrentIndex(i)
+                if not self.prompt_unsaved_changes(project=proj):
+                    event.ignore()
+                    return
+        for proj in self.projects:
+            proj.close()
         event.accept()
 
     def _create_menu_bar(self):
@@ -3197,6 +3647,7 @@ class FKVideoPlayer(QMainWindow):
 
         # File Menu
         self.menu_file = menubar.addMenu(tr('menu_file'))
+        self.menu_file.addAction("New Project Tab", lambda: self.new_project_tab(), QKeySequence("Ctrl+T"))
         self.menu_file.addAction(tr('act_new_canvas'), self.open_new_canvas_dialog, QKeySequence("Ctrl+N"))
         self.menu_file.addAction(tr('act_open_video'), self.open_file_dialog, QKeySequence("Ctrl+O"))
         self.menu_file.addAction(tr('act_capture_window'), self.open_window_capture_dialog, QKeySequence("Ctrl+Shift+W"))
@@ -3326,6 +3777,45 @@ class FKVideoPlayer(QMainWindow):
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #16161C;
+            }
+            QTabWidget::pane {
+                border: 1px solid #222230;
+                background-color: #0E0E14;
+                border-radius: 4px;
+            }
+            QTabBar::tab {
+                background-color: #161622;
+                color: #A0A0B8;
+                border: 1px solid #262638;
+                border-bottom: none;
+                padding: 5px 14px;
+                margin-right: 2px;
+                border-top-left-radius: 5px;
+                border-top-right-radius: 5px;
+                font-size: 11px;
+                font-weight: 500;
+                min-width: 80px;
+                max-width: 220px;
+            }
+            QTabBar::tab:selected {
+                background-color: #1F1F2E;
+                color: #00E5FF;
+                border: 1px solid #007AFF;
+                border-bottom: 2px solid #00E5FF;
+                font-weight: bold;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #1C1C2A;
+                color: #FFFFFF;
+            }
+            QTabBar::close-button {
+                subcontrol-position: right;
+                margin-left: 6px;
+                padding: 1px;
+            }
+            QTabBar::close-button:hover {
+                background-color: #FF3B30;
+                border-radius: 3px;
             }
             #TopToolbar, #BottomPanel, #RecordBar {
                 background-color: #1F1F28;

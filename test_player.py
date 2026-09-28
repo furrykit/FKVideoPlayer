@@ -32,7 +32,8 @@ from audio import MicrophoneRecorder, get_audio_input_devices, MicLevelMonitor
 from projects import ProjectManager
 from settings_dialogs import (
     NewCanvasDialog, ExportDialog, PreferencesDialog, DEFAULT_EXPORT_PRESETS,
-    VideoOverlaySettingsDialog, AboutDialog, DONATEPAY_URL, DONATIONALERTS_URL
+    VideoOverlaySettingsDialog, AboutDialog, DONATEPAY_URL, DONATIONALERTS_URL,
+    TELEGRAM_URL, GITHUB_URL
 )
 
 
@@ -864,6 +865,62 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         dlg = AboutDialog(parent=self.player)
         self.assertIsNotNone(dlg)
         print("[OK] Author furrykit and donation links (DonatePay, DonationAlerts) verified")
+
+    def test_34_multi_project_tabs(self):
+        """Verify multi-project tab bar creation, switching, state isolation, and closure"""
+        tabs = self.player.project_tabs
+        self.assertIsNotNone(tabs)
+        self.assertGreaterEqual(tabs.count(), 1)
+
+        # Tab 1 initial state
+        initial_tab_count = tabs.count()
+        p1 = self.player.active_project
+        self.assertIsNotNone(p1)
+
+        # Create Tab 2
+        p2 = self.player.new_project_tab(name="Secondary Project")
+        self.assertEqual(tabs.count(), initial_tab_count + 1)
+        self.assertEqual(self.player.active_project, p2)
+
+        # Verify state isolation: add stroke to Tab 2
+        pt = QPointF(50.0, 50.0)
+        s = Stroke(QColor('#00FF00'), 5.0, [pt], stroke_id=99)
+        p2.canvas.strokes.append(s)
+        self.assertEqual(len(p2.canvas.strokes), 1)
+
+        # Switch back to Tab 1
+        tabs.setCurrentIndex(0)
+        self.assertEqual(self.player.active_project, p1)
+        self.assertEqual(len(p1.canvas.strokes), 0)
+
+        # Switch forward via next_project_tab
+        self.player.next_project_tab()
+        self.assertEqual(self.player.active_project, p2)
+        self.assertEqual(len(p2.canvas.strokes), 1)
+
+        # Switch back via prev_project_tab
+        self.player.prev_project_tab()
+        self.assertEqual(self.player.active_project, p1)
+
+        # Close Tab 2
+        p2_idx = tabs.indexOf(p2.canvas)
+        self.player._on_tab_close_requested(p2_idx)
+        self.assertEqual(tabs.count(), initial_tab_count)
+
+        # Close remaining tab - should automatically recreate a fresh tab
+        self.player._on_tab_close_requested(0)
+        self.assertEqual(tabs.count(), 1)
+        self.assertIsNotNone(self.player.active_project)
+        self.assertEqual(len(self.player.canvas.strokes), 0)
+        print("[OK] Multi-project tabs creation, switching, state isolation, and tab lifecycle verified")
+
+    def test_35_about_contacts(self):
+        """Verify Telegram and GitHub contacts in About dialog"""
+        self.assertEqual(TELEGRAM_URL, "https://t.me/furrykit")
+        self.assertEqual(GITHUB_URL, "https://github.com/furrykit")
+        dlg = AboutDialog(parent=self.player)
+        self.assertIsNotNone(dlg)
+        print("[OK] Telegram @furrykit and GitHub furrykit links verified in About dialog")
 
 
 if __name__ == "__main__":

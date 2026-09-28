@@ -1024,16 +1024,18 @@ class VideoOverlaySettingsDialog(QDialog):
 # =========================================================================
 DONATEPAY_URL = "https://new.donatepay.ru/donate/ttvfurrykit"
 DONATIONALERTS_URL = "https://www.donationalerts.com/r/ttvfurrykit"
+TELEGRAM_URL = "https://t.me/furrykit"
+GITHUB_URL = "https://github.com/furrykit"
 
 class AboutDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(tr('dlg_about_title'))
         self.setStyleSheet(DIALOG_STYLE)
-        self.setFixedSize(460, 350)
+        self.setFixedSize(480, 410)
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
         lbl_title = QLabel("FKVideoPlayer")
         lbl_title.setStyleSheet("font-size: 22px; font-weight: bold; color: #007AFF;")
@@ -1048,16 +1050,33 @@ class AboutDialog(QDialog):
         lbl_desc = QLabel(tr('about_desc'))
         lbl_desc.setWordWrap(True)
         lbl_desc.setAlignment(Qt.AlignCenter)
-        lbl_desc.setStyleSheet("font-size: 13px; color: #C0C0D4; margin: 8px 0;")
+        lbl_desc.setStyleSheet("font-size: 13px; color: #C0C0D4; margin: 4px 0;")
         layout.addWidget(lbl_desc)
 
-        lbl_author = QLabel(tr('about_author'))
+        lbl_author = QLabel(f"{tr('about_author')} (furrykit)")
         lbl_author.setStyleSheet("font-size: 13px; color: #00E5FF; font-weight: bold;")
         lbl_author.setAlignment(Qt.AlignCenter)
         layout.addWidget(lbl_author)
 
-        layout.addStretch()
+        # Contacts Row
+        lbl_contact = QLabel("Contacts & Links:")
+        lbl_contact.setStyleSheet("color: #A0A0B8; font-size: 12px; font-weight: 500;")
+        lbl_contact.setAlignment(Qt.AlignCenter)
+        layout.addWidget(lbl_contact)
 
+        h_contact = QHBoxLayout()
+        btn_tg = QPushButton("💬 Telegram: @furrykit")
+        btn_tg.setStyleSheet("background-color: #229ED9; color: #FFFFFF; font-weight: bold; border: 1px solid #1E88BD;")
+        btn_tg.clicked.connect(lambda: webbrowser.open(TELEGRAM_URL))
+        h_contact.addWidget(btn_tg)
+
+        btn_gh = QPushButton("🐙 GitHub: furrykit")
+        btn_gh.setStyleSheet("background-color: #24292E; color: #FFFFFF; font-weight: bold; border: 1px solid #3F4448;")
+        btn_gh.clicked.connect(lambda: webbrowser.open(GITHUB_URL))
+        h_contact.addWidget(btn_gh)
+        layout.addLayout(h_contact)
+
+        # Support Row
         lbl_sup = QLabel("Support Creator:")
         lbl_sup.setStyleSheet("color: #A0A0B8; font-size: 12px; font-weight: 500;")
         lbl_sup.setAlignment(Qt.AlignCenter)
@@ -1074,6 +1093,8 @@ class AboutDialog(QDialog):
         btn_da.clicked.connect(lambda: webbrowser.open(DONATIONALERTS_URL))
         h_don.addWidget(btn_da)
         layout.addLayout(h_don)
+
+        layout.addStretch()
 
         btn_close = QPushButton("Close")
         btn_close.clicked.connect(self.accept)
