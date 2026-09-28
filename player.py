@@ -2,36 +2,106 @@
 # -*- coding: utf-8 -*-
 """
 Универсальный видеоплеер с покадровым воспроизведением, зумом, панорамированием
-и интерактивным рисованием поверх видео.
+и интерактивным рисованием поверх видео (Telestrator).
 """
 
 import sys
 import os
 import cv2
 import numpy as np
-from PyQt5.QtCore import Qt, QTimer, QPointF, QRectF, pyqtSignal
-from PyQt5.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QBrush, QCursor, QFont, QIcon, QKeySequence
+from PyQt5.QtCore import Qt, QTimer, QPointF, QRectF, pyqtSignal, QPoint
+from PyQt5.QtGui import (
+    QImage, QPixmap, QPainter, QPen, QColor, QBrush, QCursor,
+    QFont, QIcon, QKeySequence
+)
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QSlider, QLabel, QFileDialog, QColorDialog,
-    QToolBar, QAction, QActionGroup, QComboBox, QSpinBox,
-    QFrame, QSizePolicy, QShortcut, QMessageBox, QStyle, QStyleOptionSlider
+    QToolBar, QAction, QComboBox, QSpinBox, QFrame,
+    QSizePolicy, QShortcut, QMessageBox, QToolTip
 )
 
 
+def dist_to_segment_sq(p: QPointF, a: QPointF, b: QPointF) -> float:
+    """Квадрат расстояния от точки p до отрезка [a, b]"""
+    ab_x = b.x() - a.x()
+    ab_y = b.y() - a.y()
+    l2 = ab_x * ab_x + ab_y * ab_y
+    if l2 < 1e-6:
+        dx = p.x() - a.x()
+        dy = p.y() - a.y()
+        return dx * dx + dy * dy
+    t = max(0.0, min(1.0, ((p.x() - a.x()) * ab_x + (p.y() - a.y()) * ab_y) / l2))
+    proj_x = a.x() + t * ab_x
+    proj_y = a.y() + t * ab_y
+    dx = p.x() - proj_x
+    dy = p.y() - proj_y
+    return dx * dx + dy * dy
+
+
 class ClickableSlider(QSlider):
-    """Слайдер с мгновенным переходом по клику в любую точку шкалы"""
+    """
+    Продвинутый слайдер:
+    - Мгновенный переход по клику мыши в любую точку
+    - Плавный скраббинг при зажатии
+    - Всплывающая подсказка с временем и номером кадра при наведении
+    - Прокрутка колесиком мыши вперед/назад
+    """
+    wheel_scrolled = pyqtSignal(int)
+    hover_changed = pyqtSignal(int, QPoint)
+
+    def __init__(self, orientation=Qt.Horizontal, parent=None):
+        super().__init__(orientation, parent)
+        self.setMouseTracking(True)
+        self.fps = 25.0
+        self.is_dragging = False
+
+    def pixel_to_value(self, px: int) -> int:
+        w = max(1, self.width())
+        ratio = max(0.0, min(1.0, px / float(w)))
+        return int(round(self.minimum() + ratio * (self.maximum() - self.minimum())))
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            val = int(self.minimum() + (self.maximum() - self.minimum()) * (event.x() / max(1, self.width())))
-            val = max(self.minimum(), min(self.maximum(), val))
+            self.is_dragging = True
+            val = self.pixel_to_value(event.x())
             self.setValue(val)
             self.sliderMoved.emit(val)
         super().mousePressEvent(event)
 
+    def mouseMoveEvent(self, event):
+        val = self.pixel_to_value(event.x())
+        if self.is_dragging and (event.buttons() & Qt.LeftButton):
+            self.setValue(val)
+            self.sliderMoved.emit(val)
+
+        # Вычисляем время для подсказки при наведении
+        if self.fps > 0 and self.maximum() > 0:
+            sec = val / float(self.fps)
+            mins = int(sec // 60)
+            secs = sec % 60
+            tip_text = f"{mins:02d}:{secs:05.2f} (кадр {val + 1})"
+            QToolTip.showText(event.globalPos(), tip_text, self)
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.is_dragging = False
+        super().mouseReleaseEvent(event)
+
+    def wheelEvent(self, event):
+        delta = 1 if event.angleDelta().y() > 0 else -1
+        if event.modifiers() & Qt.ShiftModifier:
+            delta *= int(round(self.fps))  # шаг на 1 секунду с Shift
+        elif event.modifiers() & Qt.ControlModifier:
+            delta *= int(round(self.fps * 5))  # шаг на 5 секунд с Ctrl
+        self.wheel_scrolled.emit(delta)
+        event.accept()
+
 
 class Stroke:
-    """Одиночный штрих рисования в координатах видео"""
+    """Одиночный штрих рисования в координатах исходного видео"""
     def __init__(self, color, width, points=None):
         self.color = QColor(color)
         self.width = float(width)
@@ -43,8 +113,7 @@ class Stroke:
 
 class VideoCanvas(QWidget):
     """
-    Холст отображения видеокадра, масштабирования (Zoom),
-    панорамирования (Pan) и рисования поверх видео.
+    Холст видео, панорамирования, зума и рисования поверх видео
     """
     zoom_changed = pyqtSignal(float)
     drawing_changed = pyqtSignal()
@@ -72,35 +141,100 @@ class VideoCanvas(QWidget):
 
         # Инструменты рисования
         self.active_tool = self.TOOL_PEN
-        self.pen_color = QColor("#FF3B30")  # Ярко-красный по умолчанию
+        self.pen_color = QColor("#FF3B30")
         self.pen_width = 4.0
         self.eraser_radius = 16.0
 
-        # Список штрихов и история действий
+        # Штрихи и стек отмены
         self.strokes = []
         self.current_stroke = None
         self.undo_stack = []
 
-        # Курсор
         self.update_cursor()
+
+    # --- Генерация круглого курсора под размер кисти/ластика ---
+
+    def _create_brush_cursor(self) -> QCursor:
+        """
+        Создает динамический курсор-кружок, размер которого
+        точно соответствует текущему размеру кисти на экране
+        с контрастной двойной обводкой для отличной видимости на любом фоне.
+        """
+        d = max(5, int(round(self.pen_width)))
+        if d % 2 == 0:
+            d += 1  # нечетный размер для точного центра
+        size = d + 4
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        # 1. Внешний темный контур (для светлого фона)
+        painter.setPen(QPen(QColor(0, 0, 0, 220), 1.5))
+        painter.drawEllipse(2, 2, d, d)
+
+        # 2. Внутренний цветной контур цвета кисти (или белый)
+        painter.setPen(QPen(self.pen_color, 1.0))
+        painter.drawEllipse(2, 2, d, d)
+
+        # 3. Центральная точка-прицел (1px)
+        center = size // 2
+        painter.setPen(QPen(QColor(0, 0, 0, 255), 1))
+        painter.drawPoint(center, center)
+        painter.setPen(QPen(QColor(255, 255, 255, 255), 1))
+        painter.drawPoint(center, center)
+
+        painter.end()
+        return QCursor(pixmap, center, center)
+
+    def _create_eraser_cursor(self) -> QCursor:
+        """Динамический курсор для ластика"""
+        d = max(8, int(round(self.eraser_radius * 2)))
+        if d % 2 == 0:
+            d += 1
+        size = d + 4
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        # Пунктирная контрастная обводка ластика
+        painter.setPen(QPen(QColor(0, 0, 0, 200), 1.5))
+        painter.drawEllipse(2, 2, d, d)
+        painter.setPen(QPen(QColor(255, 255, 255, 240), 1.0, Qt.DashLine))
+        painter.drawEllipse(2, 2, d, d)
+
+        center = size // 2
+        painter.setPen(QPen(QColor(255, 60, 60, 240), 1))
+        painter.drawPoint(center, center)
+        painter.end()
+
+        return QCursor(pixmap, center, center)
+
+    def update_cursor(self):
+        """Обновление формы курсора в зависимости от активного инструмента и параметров"""
+        if self.active_tool == self.TOOL_PEN:
+            self.setCursor(self._create_brush_cursor())
+        elif self.active_tool == self.TOOL_ERASER:
+            self.setCursor(self._create_eraser_cursor())
+        elif self.active_tool == self.TOOL_PAN:
+            self.setCursor(Qt.OpenHandCursor)
 
     def set_tool(self, tool_code):
         self.active_tool = tool_code
         self.update_cursor()
+        self.update()
 
     def set_pen_color(self, color):
         self.pen_color = QColor(color)
+        self.update_cursor()
+        self.update()
 
     def set_pen_width(self, width):
         self.pen_width = max(1.0, float(width))
-
-    def update_cursor(self):
-        if self.active_tool == self.TOOL_PEN:
-            self.setCursor(Qt.CrossCursor)
-        elif self.active_tool == self.TOOL_ERASER:
-            self.setCursor(Qt.PointingHandCursor)
-        elif self.active_tool == self.TOOL_PAN:
-            self.setCursor(Qt.OpenHandCursor)
+        self.update_cursor()
+        self.update()
 
     def set_frame(self, frame_bgr):
         """Обновление текущего кадра из формата OpenCV BGR"""
@@ -114,7 +248,6 @@ class VideoCanvas(QWidget):
         self.video_width = w
         self.video_height = h
 
-        # Быстрая конвертация cv2 BGR в QImage RGB
         rgb_frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         bytes_per_line = ch * w
         self.current_qimage = QImage(
@@ -127,7 +260,7 @@ class VideoCanvas(QWidget):
             self.update()
 
     def fit_to_view(self):
-        """Вписать видео полностью в размер окна"""
+        """Вписать видео полностью в размер окна с сохранением пропорций"""
         if self.video_width <= 0 or self.video_height <= 0:
             self.zoom_factor = 1.0
             self.pan_offset = QPointF(0, 0)
@@ -140,7 +273,7 @@ class VideoCanvas(QWidget):
 
         scale_w = canvas_w / float(self.video_width)
         scale_h = canvas_h / float(self.video_height)
-        self.zoom_factor = min(scale_w, scale_h) * 0.95
+        self.zoom_factor = min(scale_w, scale_h) * 0.96
         self.pan_offset = QPointF(0, 0)
         self.update()
         self.zoom_changed.emit(self.zoom_factor)
@@ -165,11 +298,9 @@ class VideoCanvas(QWidget):
         old_zoom = self.zoom_factor
         old_origin = self._get_origin(old_zoom, self.pan_offset)
 
-        # Точка на видео под курсором
         video_x = (center_pt.x() - old_origin.x()) / old_zoom
         video_y = (center_pt.y() - old_origin.y()) / old_zoom
 
-        # Корректируем смещение чтобы точка видео осталась под курсором
         new_origin_x = center_pt.x() - video_x * target_zoom
         new_origin_y = center_pt.y() - video_y * target_zoom
 
@@ -198,7 +329,7 @@ class VideoCanvas(QWidget):
         sy = origin.y() + pt.y() * self.zoom_factor
         return QPointF(sx, sy)
 
-    # --- Рисование и Ластик ---
+    # --- Рисование, Ластик, Стереть всё, Стереть на шаг назад ---
 
     def clear_all_drawings(self):
         """Стереть всё нарисованное"""
@@ -212,7 +343,6 @@ class VideoCanvas(QWidget):
     def undo_last_action(self):
         """Стереть на шаг назад (Undo)"""
         if not self.undo_stack:
-            # Если в стеке пусто, но штрихи есть — удалим последний штрих
             if self.strokes:
                 self.strokes.pop()
                 self.update()
@@ -221,35 +351,47 @@ class VideoCanvas(QWidget):
 
         action_type, payload = self.undo_stack.pop()
         if action_type == 'add':
-            # Удаляем добавленный штрих
             if payload in self.strokes:
                 self.strokes.remove(payload)
         elif action_type == 'erase':
-            # Восстанавливаем стертый штрих
             stroke, original_idx = payload
             idx = min(original_idx, len(self.strokes))
             self.strokes.insert(idx, stroke)
         elif action_type == 'clear':
-            # Восстанавливаем все стертые штрихи
             self.strokes = list(payload)
 
         self.update()
         self.drawing_changed.emit()
 
     def erase_strokes_at_video_pt(self, video_pt: QPointF):
-        """Удаление штрихов, задетых ластиком"""
+        """
+        Удаление штрихов, пересекающих радиус ластика.
+        Проверяет расстояние до всех сегментов линии,
+        поэтому даже быстрые движения ластика безошибочно стирают штрихи.
+        """
         erased_any = False
-        radius_video = self.eraser_radius / max(0.1, self.zoom_factor)
+        radius_video = self.eraser_radius / max(0.01, self.zoom_factor)
         r2 = radius_video * radius_video
 
         indices_to_remove = []
         for i, stroke in enumerate(self.strokes):
-            for pt in stroke.points:
-                dx = pt.x() - video_pt.x()
-                dy = pt.y() - video_pt.y()
+            pts = stroke.points
+            if len(pts) == 0:
+                continue
+            if len(pts) == 1:
+                dx = pts[0].x() - video_pt.x()
+                dy = pts[0].y() - video_pt.y()
                 if (dx * dx + dy * dy) <= r2:
                     indices_to_remove.append(i)
+                continue
+
+            hit = False
+            for j in range(len(pts) - 1):
+                if dist_to_segment_sq(video_pt, pts[j], pts[j + 1]) <= r2:
+                    hit = True
                     break
+            if hit:
+                indices_to_remove.append(i)
 
         for idx in reversed(indices_to_remove):
             removed = self.strokes.pop(idx)
@@ -278,8 +420,7 @@ class VideoCanvas(QWidget):
                 self.setCursor(Qt.ClosedHandCursor)
             elif self.active_tool == self.TOOL_PEN:
                 vpt = self.screen_to_video(pos)
-                # Толщина штриха адаптируется к видео
-                stroke_width_video = max(1.0, self.pen_width / max(0.1, self.zoom_factor))
+                stroke_width_video = max(0.5, self.pen_width / max(0.01, self.zoom_factor))
                 self.current_stroke = Stroke(self.pen_color, stroke_width_video, [vpt])
                 self.strokes.append(self.current_stroke)
                 self.undo_stack.append(('add', self.current_stroke))
@@ -319,7 +460,6 @@ class VideoCanvas(QWidget):
             self.current_stroke = None
 
     def wheelEvent(self, event):
-        # Зум колесиком мыши в точку курсора
         num_degrees = event.angleDelta().y() / 8.0
         num_steps = num_degrees / 15.0
         factor = 1.15 ** num_steps
@@ -351,11 +491,9 @@ class VideoCanvas(QWidget):
                 self.video_height * self.zoom_factor
             )
             painter.drawImage(target_rect, self.current_qimage)
-            # Тонкая рамка вокруг видео
             painter.setPen(QPen(QColor(60, 60, 75, 180), 1))
             painter.drawRect(target_rect)
         else:
-            # Заглушка, если видео не загружено
             painter.setPen(QColor("#7E7E94"))
             painter.setFont(QFont("Segoe UI", 14, QFont.Bold))
             painter.drawText(
@@ -384,13 +522,6 @@ class VideoCanvas(QWidget):
                     p2 = self.video_to_screen(stroke.points[i + 1])
                     painter.drawLine(p1, p2)
 
-        # 4. Визуальный маркер ластика вокруг мыши при наведении
-        if self.active_tool == self.TOOL_ERASER and self.rect().contains(self.mapFromGlobal(QCursor.pos())):
-            mouse_p = self.mapFromGlobal(QCursor.pos())
-            painter.setPen(QPen(QColor(255, 255, 255, 200), 1.5, Qt.DashLine))
-            painter.setBrush(QBrush(QColor(255, 255, 255, 30)))
-            painter.drawEllipse(mouse_p, int(self.eraser_radius), int(self.eraser_radius))
-
 
 class VideoPlayerWindow(QMainWindow):
     """Главное окно видеоплеера с расширенным управлением"""
@@ -398,10 +529,9 @@ class VideoPlayerWindow(QMainWindow):
     def __init__(self, initial_video_path=None):
         super().__init__()
         self.setWindowTitle("Pro Video Player & Telestrator")
-        self.resize(1100, 750)
-        self.setMinimumSize(700, 500)
+        self.resize(1150, 780)
+        self.setMinimumSize(750, 520)
 
-        # Настройка окна и перетаскивания файлов
         self.setAcceptDrops(True)
 
         # Переменные видеопотока
@@ -439,14 +569,14 @@ class VideoPlayerWindow(QMainWindow):
         self.canvas.zoom_changed.connect(self._on_canvas_zoom_changed)
         self.canvas.drawing_changed.connect(self._on_drawing_changed)
 
-        # 2. Верхняя панель инструментов (Рисование, Цвета, Зум)
+        # 2. Верхняя панель инструментов
         self._create_top_toolbar()
         main_layout.addWidget(self.top_toolbar)
 
         # Добавляем холст
         main_layout.addWidget(self.canvas, stretch=1)
 
-        # 3. Нижняя панель таймлайна и управления воспроизведением
+        # 3. Нижняя панель таймлайна и воспроизведения
         bottom_panel = self._create_bottom_controls()
         main_layout.addWidget(bottom_panel)
 
@@ -454,37 +584,41 @@ class VideoPlayerWindow(QMainWindow):
         self.top_toolbar = QFrame()
         self.top_toolbar.setObjectName("TopToolbar")
         layout = QHBoxLayout(self.top_toolbar)
-        layout.setContentsMargins(6, 4, 6, 4)
-        layout.setSpacing(8)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(6)
 
-        # Кнопка открытия файла
-        self.btn_open = QPushButton("📂 Открыть видео")
+        # Открытие файла
+        self.btn_open = QPushButton("📂 Открыть")
+        self.btn_open.setToolTip("Открыть видеофайл (O)")
         self.btn_open.clicked.connect(self.open_file_dialog)
         layout.addWidget(self.btn_open)
 
         self._add_separator(layout)
 
-        # Инструменты: Карандаш, Ластик, Перемещение
-        self.btn_tool_pen = QPushButton("✏️ Карандаш")
+        # Инструменты
+        self.btn_tool_pen = QPushButton("✏️ Кисть")
+        self.btn_tool_pen.setToolTip("Инструмент 'Кисть' для рисования поверх видео (P)")
         self.btn_tool_pen.setCheckable(True)
         self.btn_tool_pen.setChecked(True)
         self.btn_tool_pen.clicked.connect(lambda: self._select_tool(VideoCanvas.TOOL_PEN))
         layout.addWidget(self.btn_tool_pen)
 
         self.btn_tool_eraser = QPushButton("🧹 Ластик")
+        self.btn_tool_eraser.setToolTip("Инструмент 'Ластик' для стирания штрихов (E)")
         self.btn_tool_eraser.setCheckable(True)
         self.btn_tool_eraser.clicked.connect(lambda: self._select_tool(VideoCanvas.TOOL_ERASER))
         layout.addWidget(self.btn_tool_eraser)
 
-        self.btn_tool_pan = QPushButton("✋ Рука (Pan)")
+        self.btn_tool_pan = QPushButton("✋ Рука")
+        self.btn_tool_pan.setToolTip("Инструмент 'Рука' для перемещения видео (H)")
         self.btn_tool_pan.setCheckable(True)
         self.btn_tool_pan.clicked.connect(lambda: self._select_tool(VideoCanvas.TOOL_PAN))
         layout.addWidget(self.btn_tool_pan)
 
         self._add_separator(layout)
 
-        # Палитра быстрых цветов
-        self.color_buttons = []
+        # Палитра быстрых цветов с активной подсветкой
+        self.preset_color_buttons = {}
         preset_colors = [
             ("#FF3B30", "Красный"),
             ("#34C759", "Зеленый"),
@@ -497,35 +631,33 @@ class VideoPlayerWindow(QMainWindow):
         layout.addWidget(QLabel("Цвет:"))
         for hex_code, name in preset_colors:
             btn = QPushButton()
-            btn.setFixedSize(24, 24)
-            btn.setToolTip(name)
-            btn.setStyleSheet(
-                f"background-color: {hex_code}; border-radius: 12px; border: 2px solid #555;"
-            )
+            btn.setFixedSize(22, 22)
+            btn.setToolTip(f"{name} ({hex_code})")
+            btn.setCursor(Qt.PointingHandCursor)
             btn.clicked.connect(lambda _, c=hex_code: self._set_brush_color(c))
             layout.addWidget(btn)
-            self.color_buttons.append(btn)
+            self.preset_color_buttons[hex_code.upper()] = btn
 
         self.btn_custom_color = QPushButton("🎨")
-        self.btn_custom_color.setToolTip("Выбрать произвольный цвет")
-        self.btn_custom_color.setFixedSize(28, 28)
+        self.btn_custom_color.setToolTip("Выбрать любой цвет из палитры...")
+        self.btn_custom_color.setFixedSize(26, 26)
         self.btn_custom_color.clicked.connect(self._pick_custom_color)
         layout.addWidget(self.btn_custom_color)
 
-        # Индикатор текущего цвета
+        # Превью выбранного цвета
         self.color_indicator = QFrame()
         self.color_indicator.setFixedSize(20, 20)
-        self.color_indicator.setStyleSheet(
-            f"background-color: {self.canvas.pen_color.name()}; border: 1px solid #FFF; border-radius: 4px;"
-        )
+        self.color_indicator.setToolTip("Текущий цвет кисти")
         layout.addWidget(self.color_indicator)
+        self._update_color_buttons_state("#FF3B30")
 
         # Толщина кисти
         layout.addWidget(QLabel("Толщина:"))
         self.spin_width = QSpinBox()
-        self.spin_width.setRange(1, 40)
+        self.spin_width.setRange(1, 60)
         self.spin_width.setValue(4)
         self.spin_width.setSuffix(" px")
+        self.spin_width.setToolTip("Толщина кисти (клавиши [ и ])")
         self.spin_width.valueChanged.connect(self._on_pen_width_changed)
         layout.addWidget(self.spin_width)
 
@@ -538,7 +670,7 @@ class VideoPlayerWindow(QMainWindow):
         layout.addWidget(self.btn_undo)
 
         self.btn_clear_all = QPushButton("🗑 Стереть всё")
-        self.btn_clear_all.setToolTip("Очистить все рисунки с видео (Delete)")
+        self.btn_clear_all.setToolTip("Очистить все рисунки с видео (Delete или C)")
         self.btn_clear_all.clicked.connect(self.canvas.clear_all_drawings)
         layout.addWidget(self.btn_clear_all)
 
@@ -546,7 +678,7 @@ class VideoPlayerWindow(QMainWindow):
 
         # Управление зумом
         self.lbl_zoom = QLabel("100%")
-        self.lbl_zoom.setMinimumWidth(50)
+        self.lbl_zoom.setMinimumWidth(45)
         self.lbl_zoom.setAlignment(Qt.AlignCenter)
 
         self.btn_zoom_out = QPushButton("🔍-")
@@ -557,8 +689,8 @@ class VideoPlayerWindow(QMainWindow):
         self.btn_zoom_in.setToolTip("Приблизить видео (+)")
         self.btn_zoom_in.clicked.connect(self.canvas.zoom_in)
 
-        self.btn_zoom_reset = QPushButton("1:1 Сброс")
-        self.btn_zoom_reset.setToolTip("Вписать видео в окно (0)")
+        self.btn_zoom_reset = QPushButton("1:1")
+        self.btn_zoom_reset.setToolTip("Вписать видео в экран (0)")
         self.btn_zoom_reset.clicked.connect(self.canvas.fit_to_view)
 
         layout.addWidget(self.btn_zoom_out)
@@ -570,7 +702,7 @@ class VideoPlayerWindow(QMainWindow):
         line = QFrame()
         line.setFrameShape(QFrame.VLine)
         line.setFrameShadow(QFrame.Sunken)
-        line.setStyleSheet("color: #3E3E50; margin: 2px 4px;")
+        line.setStyleSheet("color: #383848; margin: 2px 2px;")
         layout.addWidget(line)
 
     def _create_bottom_controls(self):
@@ -580,47 +712,58 @@ class VideoPlayerWindow(QMainWindow):
         layout.setContentsMargins(8, 6, 8, 6)
         layout.setSpacing(6)
 
-        # 1. Полоса перемотки (Slider) с мгновенным кликом
+        # 1. Полоса перемотки (ClickableSlider)
         self.timeline_slider = ClickableSlider(Qt.Horizontal)
         self.timeline_slider.setRange(0, 0)
         self.timeline_slider.sliderMoved.connect(self._on_slider_moved)
         self.timeline_slider.sliderPressed.connect(self._on_slider_pressed)
         self.timeline_slider.sliderReleased.connect(self._on_slider_released)
+        self.timeline_slider.wheel_scrolled.connect(self._on_slider_wheel)
         layout.addWidget(self.timeline_slider)
 
-        # 2. Кнопки воспроизведения, покадровой навигации, времени
+        # 2. Панель кнопок навигации и управления
         ctrl_layout = QHBoxLayout()
         ctrl_layout.setContentsMargins(0, 0, 0, 0)
-        ctrl_layout.setSpacing(8)
+        ctrl_layout.setSpacing(6)
 
-        # Перемотка на -5 секунд
+        # Быстрая перемотка назад
         self.btn_rewind_5s = QPushButton("⏮ -5с")
-        self.btn_rewind_5s.setToolTip("Перемотка на 5 секунд назад")
+        self.btn_rewind_5s.setToolTip("Назад на 5 секунд (J или Ctrl+Left)")
         self.btn_rewind_5s.clicked.connect(lambda: self.seek_seconds(-5.0))
         ctrl_layout.addWidget(self.btn_rewind_5s)
 
+        self.btn_rewind_1s = QPushButton("◀◀ -1с")
+        self.btn_rewind_1s.setToolTip("Назад на 1 секунду (Shift+Left)")
+        self.btn_rewind_1s.clicked.connect(lambda: self.seek_seconds(-1.0))
+        ctrl_layout.addWidget(self.btn_rewind_1s)
+
         # Покадрово назад (-1 кадр)
         self.btn_prev_frame = QPushButton("◀| Кадр -1")
-        self.btn_prev_frame.setToolTip("Шаг назад на один кадр (Стрелка влево)")
+        self.btn_prev_frame.setToolTip("Шаг назад на 1 кадр (Стрелка влево)")
         self.btn_prev_frame.clicked.connect(lambda: self.step_frame(-1))
         ctrl_layout.addWidget(self.btn_prev_frame)
 
         # Воспроизведение / Пауза
         self.btn_play_pause = QPushButton("▶ Пуск")
         self.btn_play_pause.setObjectName("PlayButton")
-        self.btn_play_pause.setToolTip("Воспроизведение / Пауза (Пробел)")
+        self.btn_play_pause.setToolTip("Воспроизведение / Пауза (Пробел или K)")
         self.btn_play_pause.clicked.connect(self.toggle_play_pause)
         ctrl_layout.addWidget(self.btn_play_pause)
 
         # Покадрово вперед (+1 кадр)
         self.btn_next_frame = QPushButton("|▶ Кадр +1")
-        self.btn_next_frame.setToolTip("Шаг вперед на один кадр (Стрелка вправо)")
+        self.btn_next_frame.setToolTip("Шаг вперед на 1 кадр (Стрелка вправо)")
         self.btn_next_frame.clicked.connect(lambda: self.step_frame(1))
         ctrl_layout.addWidget(self.btn_next_frame)
 
-        # Перемотка на +5 секунд
+        # Быстрая перемотка вперед
+        self.btn_forward_1s = QPushButton("+1с ▶▶")
+        self.btn_forward_1s.setToolTip("Вперед на 1 секунду (Shift+Right)")
+        self.btn_forward_1s.clicked.connect(lambda: self.seek_seconds(1.0))
+        ctrl_layout.addWidget(self.btn_forward_1s)
+
         self.btn_forward_5s = QPushButton("+5с ⏭")
-        self.btn_forward_5s.setToolTip("Перемотка на 5 секунд вперед")
+        self.btn_forward_5s.setToolTip("Вперед на 5 секунд (L или Ctrl+Right)")
         self.btn_forward_5s.clicked.connect(lambda: self.seek_seconds(5.0))
         ctrl_layout.addWidget(self.btn_forward_5s)
 
@@ -628,10 +771,11 @@ class VideoPlayerWindow(QMainWindow):
         self.btn_loop = QPushButton("🔁 Цикл")
         self.btn_loop.setCheckable(True)
         self.btn_loop.setChecked(True)
+        self.btn_loop.setToolTip("Зацикливать видео при достижении конца")
         self.btn_loop.clicked.connect(self._toggle_loop)
         ctrl_layout.addWidget(self.btn_loop)
 
-        # Выбор скорости воспроизведения
+        # Скорость воспроизведения
         ctrl_layout.addWidget(QLabel("Скорость:"))
         self.combo_speed = QComboBox()
         self.combo_speed.addItems(["0.25x", "0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x"])
@@ -641,30 +785,58 @@ class VideoPlayerWindow(QMainWindow):
 
         ctrl_layout.addStretch(1)
 
-        # Метка текущего времени и номера кадра
-        self.lbl_time_info = QLabel("00:00.00 / 00:00.00  |  Кадр: 0 / 0")
-        self.lbl_time_info.setStyleSheet("font-family: Consolas, monospace; font-size: 13px; color: #A0A5B5;")
+        # Информация о времени и кадрах
+        self.lbl_time_info = QLabel("00:00.00 / 00:00.00  |  Кадр: 0 / 0  (0.0 FPS)")
+        self.lbl_time_info.setStyleSheet("font-family: Consolas, monospace; font-size: 13px; color: #9EABB8;")
         ctrl_layout.addWidget(self.lbl_time_info)
 
         layout.addLayout(ctrl_layout)
         return panel
 
     def _setup_shortcuts(self):
-        """Горячие клавиши для мгновенного контроля"""
+        """Полный набор удобных горячих клавиш"""
+        # Воспроизведение
         QShortcut(QKeySequence(Qt.Key_Space), self, self.toggle_play_pause)
+        QShortcut(QKeySequence("K"), self, self.toggle_play_pause)
+
+        # Покадровая навигация
         QShortcut(QKeySequence(Qt.Key_Left), self, lambda: self.step_frame(-1))
         QShortcut(QKeySequence(Qt.Key_Right), self, lambda: self.step_frame(1))
+
+        # Перемотка на 1 секунду
         QShortcut(QKeySequence("Shift+Left"), self, lambda: self.seek_seconds(-1.0))
         QShortcut(QKeySequence("Shift+Right"), self, lambda: self.seek_seconds(1.0))
+
+        # Перемотка на 5 секунд
+        QShortcut(QKeySequence("Ctrl+Left"), self, lambda: self.seek_seconds(-5.0))
+        QShortcut(QKeySequence("Ctrl+Right"), self, lambda: self.seek_seconds(5.0))
+        QShortcut(QKeySequence("J"), self, lambda: self.seek_seconds(-5.0))
+        QShortcut(QKeySequence("L"), self, lambda: self.seek_seconds(5.0))
+
+        # Переход в начало и конец
+        QShortcut(QKeySequence(Qt.Key_Home), self, lambda: self._seek_to_frame(0))
+        QShortcut(QKeySequence(Qt.Key_End), self, lambda: self._seek_to_frame(self.total_frames - 1))
+
+        # Рисование и действия
         QShortcut(QKeySequence("Ctrl+Z"), self, self.canvas.undo_last_action)
         QShortcut(QKeySequence(Qt.Key_Delete), self, self.canvas.clear_all_drawings)
+        QShortcut(QKeySequence("C"), self, self.canvas.clear_all_drawings)
+
+        # Толщина кисти клавишами [ и ]
+        QShortcut(QKeySequence("["), self, lambda: self.spin_width.setValue(self.spin_width.value() - 1))
+        QShortcut(QKeySequence("]"), self, lambda: self.spin_width.setValue(self.spin_width.value() + 1))
+
+        # Зум
         QShortcut(QKeySequence("+"), self, self.canvas.zoom_in)
         QShortcut(QKeySequence("="), self, self.canvas.zoom_in)
         QShortcut(QKeySequence("-"), self, self.canvas.zoom_out)
         QShortcut(QKeySequence("0"), self, self.canvas.fit_to_view)
+
+        # Инструменты
         QShortcut(QKeySequence("P"), self, lambda: self._select_tool(VideoCanvas.TOOL_PEN))
         QShortcut(QKeySequence("E"), self, lambda: self._select_tool(VideoCanvas.TOOL_ERASER))
         QShortcut(QKeySequence("H"), self, lambda: self._select_tool(VideoCanvas.TOOL_PAN))
+        QShortcut(QKeySequence("O"), self, self.open_file_dialog)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -677,7 +849,7 @@ class VideoPlayerWindow(QMainWindow):
             if os.path.exists(file_path):
                 self.load_video(file_path)
 
-    # --- Обработчики инструментов и рисования ---
+    # --- Инструменты, Цвета, Толщина ---
 
     def _select_tool(self, tool_code):
         self.btn_tool_pen.setChecked(tool_code == VideoCanvas.TOOL_PEN)
@@ -685,11 +857,25 @@ class VideoPlayerWindow(QMainWindow):
         self.btn_tool_pan.setChecked(tool_code == VideoCanvas.TOOL_PAN)
         self.canvas.set_tool(tool_code)
 
+    def _update_color_buttons_state(self, current_hex):
+        current_hex = current_hex.upper()
+        for hex_code, btn in self.preset_color_buttons.items():
+            if hex_code == current_hex:
+                btn.setStyleSheet(
+                    f"background-color: {hex_code}; border-radius: 11px; border: 2px solid #FFFFFF; outline: 2px solid #007AFF;"
+                )
+            else:
+                btn.setStyleSheet(
+                    f"background-color: {hex_code}; border-radius: 11px; border: 2px solid #484858;"
+                )
+
+        self.color_indicator.setStyleSheet(
+            f"background-color: {current_hex}; border: 2px solid #FFFFFF; border-radius: 4px;"
+        )
+
     def _set_brush_color(self, hex_color):
         self.canvas.set_pen_color(hex_color)
-        self.color_indicator.setStyleSheet(
-            f"background-color: {hex_color}; border: 1px solid #FFF; border-radius: 4px;"
-        )
+        self._update_color_buttons_state(hex_color)
         if self.canvas.active_tool != VideoCanvas.TOOL_PEN:
             self._select_tool(VideoCanvas.TOOL_PEN)
 
@@ -714,7 +900,7 @@ class VideoPlayerWindow(QMainWindow):
             self,
             "Выберите видеофайл",
             "",
-            "Видеофайлы (*.mp4 *.avi *.mkv *.mov *.webm *.flv);;Все файлы (*.*)"
+            "Видеофайлы (*.mp4 *.avi *.mkv *.mov *.webm *.flv *.m4v);;Все файлы (*.*)"
         )
         if file_path:
             self.load_video(file_path)
@@ -735,6 +921,7 @@ class VideoPlayerWindow(QMainWindow):
         if self.fps <= 1.0 or np.isnan(self.fps):
             self.fps = 25.0
 
+        self.timeline_slider.fps = self.fps
         self.timeline_slider.setRange(0, max(0, self.total_frames - 1))
         self.timeline_slider.setValue(0)
         self.current_frame_idx = 0
@@ -758,7 +945,7 @@ class VideoPlayerWindow(QMainWindow):
             self.current_frame_idx = frame_idx
             self.canvas.set_frame(frame)
             self._update_time_label()
-            if not self.timeline_slider.isSliderDown():
+            if not self.timeline_slider.is_dragging:
                 self.timeline_slider.blockSignals(True)
                 self.timeline_slider.setValue(frame_idx)
                 self.timeline_slider.blockSignals(False)
@@ -795,6 +982,8 @@ class VideoPlayerWindow(QMainWindow):
         if next_frame >= self.total_frames:
             if self.is_looping:
                 next_frame = 0
+                self._seek_to_frame(0)
+                return
             else:
                 self.pause()
                 return
@@ -804,9 +993,10 @@ class VideoPlayerWindow(QMainWindow):
             self.current_frame_idx = next_frame
             self.canvas.set_frame(frame)
             self._update_time_label()
-            self.timeline_slider.blockSignals(True)
-            self.timeline_slider.setValue(next_frame)
-            self.timeline_slider.blockSignals(False)
+            if not self.timeline_slider.is_dragging:
+                self.timeline_slider.blockSignals(True)
+                self.timeline_slider.setValue(next_frame)
+                self.timeline_slider.blockSignals(False)
         else:
             if self.is_looping:
                 self._seek_to_frame(0)
@@ -852,6 +1042,10 @@ class VideoPlayerWindow(QMainWindow):
         if getattr(self, '_was_playing_before_scrub', False):
             self.play()
 
+    def _on_slider_wheel(self, delta):
+        target = self.current_frame_idx + delta
+        self._seek_to_frame(target)
+
     def _format_time(self, seconds):
         mins = int(seconds // 60)
         secs = seconds % 60
@@ -862,61 +1056,62 @@ class VideoPlayerWindow(QMainWindow):
             cur_sec = self.current_frame_idx / self.fps
             tot_sec = self.total_frames / self.fps
             self.lbl_time_info.setText(
-                f"{self._format_time(cur_sec)} / {self._format_time(tot_sec)}  |  Кадр: {self.current_frame_idx + 1} / {self.total_frames}"
+                f"{self._format_time(cur_sec)} / {self._format_time(tot_sec)}  |  Кадр: {self.current_frame_idx + 1} / {self.total_frames}  ({self.fps:.1f} FPS)"
             )
         else:
-            self.lbl_time_info.setText("00:00.00 / 00:00.00  |  Кадр: 0 / 0")
+            self.lbl_time_info.setText("00:00.00 / 00:00.00  |  Кадр: 0 / 0  (0.0 FPS)")
 
     def _apply_dark_theme(self):
         """Премиальный темный интерфейс"""
         self.setStyleSheet("""
             QMainWindow {
-                background-color: #18181E;
+                background-color: #16161C;
             }
             #TopToolbar, #BottomPanel {
-                background-color: #21212B;
-                border: 1px solid #2D2D3B;
+                background-color: #1F1F28;
+                border: 1px solid #2B2B38;
                 border-radius: 8px;
             }
             QLabel {
-                color: #D3D3E0;
+                color: #D2D2E0;
                 font-size: 12px;
                 font-family: 'Segoe UI', Arial, sans-serif;
             }
             QPushButton {
-                background-color: #2C2C3A;
+                background-color: #2A2A38;
                 color: #E2E2EC;
-                border: 1px solid #3E3E50;
+                border: 1px solid #3B3B4E;
                 border-radius: 5px;
-                padding: 5px 10px;
+                padding: 5px 9px;
                 font-weight: 500;
                 font-size: 12px;
                 font-family: 'Segoe UI', Arial, sans-serif;
             }
             QPushButton:hover {
-                background-color: #39394B;
+                background-color: #373748;
                 border-color: #55556B;
             }
             QPushButton:pressed {
-                background-color: #1F1F29;
+                background-color: #1A1A24;
             }
             QPushButton:checked {
                 background-color: #007AFF;
                 color: #FFFFFF;
-                border-color: #2B8CFF;
+                border-color: #3895FF;
             }
             #PlayButton {
                 background-color: #248A3D;
                 font-weight: bold;
                 min-width: 80px;
+                border-color: #2EA249;
             }
             #PlayButton:hover {
-                background-color: #2DAC4D;
+                background-color: #2CAC4B;
             }
             QSpinBox, QComboBox {
-                background-color: #2C2C3A;
+                background-color: #2A2A38;
                 color: #E2E2EC;
-                border: 1px solid #3E3E50;
+                border: 1px solid #3B3B4E;
                 border-radius: 4px;
                 padding: 4px 6px;
                 font-size: 12px;
@@ -925,8 +1120,8 @@ class VideoPlayerWindow(QMainWindow):
                 border: 0px;
             }
             QSlider::groove:horizontal {
-                height: 6px;
-                background: #2C2C3A;
+                height: 7px;
+                background: #282836;
                 border-radius: 3px;
             }
             QSlider::sub-page:horizontal {
@@ -935,14 +1130,24 @@ class VideoPlayerWindow(QMainWindow):
             }
             QSlider::handle:horizontal {
                 background: #FFFFFF;
-                border: 1px solid #007AFF;
+                border: 2px solid #007AFF;
                 width: 14px;
                 margin-top: -4px;
                 margin-bottom: -4px;
                 border-radius: 7px;
             }
             QSlider::handle:horizontal:hover {
-                background: #007AFF;
+                background: #60A5FA;
+                transform: scale(1.2);
+            }
+            QToolTip {
+                background-color: #2A2A36;
+                color: #FFFFFF;
+                border: 1px solid #4E4E62;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 11px;
+                font-family: Consolas, monospace;
             }
         """)
 

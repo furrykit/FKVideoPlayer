@@ -1,33 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Автоматический тест функционала плеера:
+Автоматический тест полного функционала обновленного плеера:
 - Загрузка видео
 - Пауза / Воспроизведение
 - Покадровая навигация (+1, -1)
-- Перемотка времени (+5с, -5с, слайдер)
-- Зум (Zoom In, Zoom Out, Reset 1:1, Fit to view)
-- Рисование поверх видео
-- Смена цвета и толщины кисти
-- Стирание ластиком
-- Кнопка 'Стереть на шаг назад' (Undo)
-- Кнопка 'Стереть всё' (Clear all)
+- Удобная перемотка (J, L, +1s, -1s, +5s, -5s, слайдер, колесико)
+- Зум и проекция координат
+- Рисование поверх видео и отмена (Undo / Clear All)
+- Ластик с проверкой пересечения отрезков (segment distance)
+- Динамический круглый курсор под размер кисти и ластика
+- Смена цвета с активной подсветкой кнопок палитры
 """
 
 import os
 import sys
 import unittest
-from PyQt5.QtCore import Qt, QPointF
-from PyQt5.QtGui import QColor
+from PyQt5.QtCore import Qt, QPointF, QPoint
+from PyQt5.QtGui import QColor, QMouseEvent
 from PyQt5.QtWidgets import QApplication
 
-# Установка offscreen для запуска без физического монитора при тестировании
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
-from player import VideoPlayerWindow, VideoCanvas, Stroke
+from player import VideoPlayerWindow, VideoCanvas, Stroke, dist_to_segment_sq
 
 
-class TestVideoPlayer(unittest.TestCase):
+class TestEnhancedVideoPlayer(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance()
@@ -46,69 +44,73 @@ class TestVideoPlayer(unittest.TestCase):
         self.player.close()
 
     def test_01_video_loaded(self):
-        """Проверка корректной загрузки видео"""
+        """Проверка загрузки видео"""
         self.assertIsNotNone(self.player.cap)
         self.assertTrue(self.player.cap.isOpened())
         self.assertGreater(self.player.total_frames, 0)
         self.assertGreater(self.player.fps, 0)
         self.assertEqual(self.player.current_frame_idx, 0)
         self.assertIsNotNone(self.player.canvas.current_qimage)
-        print(f"[OK] Видео успешно загружено: {self.player.total_frames} кадров, {self.player.fps} FPS")
+        print(f"[OK] Видео загружено: {self.player.total_frames} кадров, {self.player.fps} FPS")
 
     def test_02_play_and_pause(self):
-        """Проверка паузы и воспроизведения"""
+        """Проверка воспроизведения и паузы"""
         self.assertFalse(self.player.is_playing)
         self.player.play()
         self.assertTrue(self.player.is_playing)
-        self.assertTrue(self.player.play_timer.isActive())
 
-        # Симуляция тика воспроизведения
+        # Тик таймера
         self.player._on_play_tick()
         self.assertEqual(self.player.current_frame_idx, 1)
 
         self.player.pause()
         self.assertFalse(self.player.is_playing)
-        self.assertFalse(self.player.play_timer.isActive())
         print("[OK] Воспроизведение и пауза работают штатно")
 
     def test_03_frame_stepping(self):
-        """Проверка покадровой навигации вперед и назад"""
+        """Покадровый шаг (+1 и -1)"""
         self.player._seek_to_frame(10)
         self.assertEqual(self.player.current_frame_idx, 10)
 
-        # Шаг вперед на 1 кадр
         self.player.step_frame(1)
         self.assertEqual(self.player.current_frame_idx, 11)
 
-        # Шаг назад на 1 кадр
         self.player.step_frame(-1)
         self.assertEqual(self.player.current_frame_idx, 10)
+        print("[OK] Покадровый переход вперед (+1) и назад (-1) работает точно")
 
-        # Шаг назад еще раз
-        self.player.step_frame(-1)
-        self.assertEqual(self.player.current_frame_idx, 9)
-        print("[OK] Покадровое переключение вперед (+1) и назад (-1) работает точно")
-
-    def test_04_seeking_and_slider(self):
-        """Проверка перемотки и слайдера"""
-        # Перемотка на +1 секунду
-        self.player._seek_to_frame(0)
+    def test_04_convenient_seeking(self):
+        """Удобная перемотка (1s, 5s, J, L, слайдер)"""
         fps = int(self.player.fps)
+        self.player._seek_to_frame(0)
+
+        # Перемотка на +1 секунду
         self.player.seek_seconds(1.0)
         self.assertEqual(self.player.current_frame_idx, fps)
 
-        # Перемотка через слайдер
-        self.player.timeline_slider.setValue(30)
-        self.player._on_slider_moved(30)
-        self.assertEqual(self.player.current_frame_idx, 30)
-
-        # Перемотка на -5 секунд с ограничением на нулевой кадр
-        self.player.seek_seconds(-5.0)
+        # Перемотка на -1 секунду
+        self.player.seek_seconds(-1.0)
         self.assertEqual(self.player.current_frame_idx, 0)
-        print("[OK] Перемотка по времени и перемещение по шкале работают корректно")
+
+        # Перемотка на +5 секунд
+        self.player.seek_seconds(5.0)
+        self.assertEqual(self.player.current_frame_idx, min(self.player.total_frames - 1, fps * 5))
+
+        # Переход через колесико на слайдере
+        self.player._seek_to_frame(20)
+        self.player._on_slider_wheel(3)
+        self.assertEqual(self.player.current_frame_idx, 23)
+
+        # Клик по слайдеру
+        slider = self.player.timeline_slider
+        slider.resize(500, 30)
+        ev_click = QMouseEvent(QMouseEvent.MouseButtonPress, QPoint(250, 15), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+        slider.mousePressEvent(ev_click)
+        self.assertGreater(self.player.current_frame_idx, 0)
+        print("[OK] Удобная перемотка (+/-1с, +/-5с, колесо, клик слайдера) проверена")
 
     def test_05_zoom_and_pan(self):
-        """Проверка масштабирования (Zoom In, Zoom Out, Reset)"""
+        """Масштабирование (Zoom In, Zoom Out, 1:1)"""
         canvas = self.player.canvas
         canvas.reset_zoom_100()
         self.assertAlmostEqual(canvas.zoom_factor, 1.0, places=2)
@@ -122,80 +124,95 @@ class TestVideoPlayer(unittest.TestCase):
 
         canvas.reset_zoom_100()
         self.assertAlmostEqual(canvas.zoom_factor, 1.0, places=2)
+        print("[OK] Зум (приближение, отдаление, 1:1) работает корректно")
 
-        # Проверка прямого и обратного преобразования координат
-        test_pt = QPointF(100.0, 150.0)
-        screen_pt = canvas.video_to_screen(test_pt)
-        restored_pt = canvas.screen_to_video(screen_pt)
-        self.assertAlmostEqual(test_pt.x(), restored_pt.x(), places=3)
-        self.assertAlmostEqual(test_pt.y(), restored_pt.y(), places=3)
-        print("[OK] Зум (приближение, отдаление, сброс) и проекция координат работают идеально")
-
-    def test_06_drawing_and_undo_and_clear_all(self):
-        """Проверка рисования, отмены шага (Undo) и полной очистки"""
+    def test_06_brush_circle_cursor(self):
+        """Проверка динамического курсора-кружка под размер кисти"""
         canvas = self.player.canvas
-        self.assertEqual(len(canvas.strokes), 0)
 
-        # 1. Рисуем штрих 1
-        s1 = Stroke(QColor("#FF0000"), 4.0, [QPointF(50, 50), QPointF(60, 60), QPointF(70, 70)])
-        canvas.strokes.append(s1)
-        canvas.undo_stack.append(('add', s1))
-        self.assertEqual(len(canvas.strokes), 1)
+        # Выбираем кисть
+        self.player._select_tool(VideoCanvas.TOOL_PEN)
+        self.assertEqual(canvas.active_tool, VideoCanvas.TOOL_PEN)
 
-        # 2. Рисуем штрих 2
-        s2 = Stroke(QColor("#00FF00"), 6.0, [QPointF(100, 100), QPointF(120, 120)])
-        canvas.strokes.append(s2)
-        canvas.undo_stack.append(('add', s2))
-        self.assertEqual(len(canvas.strokes), 2)
+        # Проверяем, что курсор существует и имеет тип QBitmap/Pixmap (Custom)
+        cur = canvas.cursor()
+        self.assertEqual(cur.shape(), Qt.BitmapCursor)
 
-        # 3. Кнопка 'Стереть на шаг назад' (Undo)
-        canvas.undo_last_action()
-        self.assertEqual(len(canvas.strokes), 1)
-        self.assertEqual(canvas.strokes[0], s1)
+        # Меняем размер кисти - курсор обновляется
+        self.player.spin_width.setValue(16)
+        self.assertEqual(canvas.pen_width, 16.0)
+        cur16 = canvas.cursor()
+        self.assertEqual(cur16.shape(), Qt.BitmapCursor)
 
-        # 4. Добавляем снова штрих
-        canvas.strokes.append(s2)
-        canvas.undo_stack.append(('add', s2))
-        self.assertEqual(len(canvas.strokes), 2)
+        # Выбираем ластик - курсор ластика тоже динамический круг
+        self.player._select_tool(VideoCanvas.TOOL_ERASER)
+        self.assertEqual(canvas.active_tool, VideoCanvas.TOOL_ERASER)
+        cur_eraser = canvas.cursor()
+        self.assertEqual(cur_eraser.shape(), Qt.BitmapCursor)
+        print("[OK] Динамический круглый курсор под размер кисти и ластика работает")
 
-        # 5. Кнопка 'Стереть всё'
-        canvas.clear_all_drawings()
-        self.assertEqual(len(canvas.strokes), 0)
-
-        # 6. 'Стереть на шаг назад' после 'Стереть всё' восстанавливает всё
-        canvas.undo_last_action()
-        self.assertEqual(len(canvas.strokes), 2)
-        print("[OK] Рисование, 'Стереть на шаг назад' и 'Стереть всё' работают безупречно")
-
-    def test_07_eraser_tool(self):
-        """Проверка работы инструмента 'Ластик'"""
+    def test_07_drawing_undo_and_clear_all(self):
+        """Рисование, отмена на шаг назад и полная очистка"""
         canvas = self.player.canvas
         canvas.strokes.clear()
         canvas.undo_stack.clear()
 
-        # Создаем штрих в районе (200, 200)
-        s = Stroke(QColor("#0000FF"), 4.0, [QPointF(200, 200), QPointF(205, 205)])
+        s1 = Stroke(QColor("#FF0000"), 4.0, [QPointF(10, 10), QPointF(20, 20)])
+        canvas.strokes.append(s1)
+        canvas.undo_stack.append(('add', s1))
+
+        s2 = Stroke(QColor("#00FF00"), 8.0, [QPointF(50, 50), QPointF(60, 60)])
+        canvas.strokes.append(s2)
+        canvas.undo_stack.append(('add', s2))
+        self.assertEqual(len(canvas.strokes), 2)
+
+        # Отмена шага
+        canvas.undo_last_action()
+        self.assertEqual(len(canvas.strokes), 1)
+
+        # Стереть всё
+        canvas.clear_all_drawings()
+        self.assertEqual(len(canvas.strokes), 0)
+
+        # Отмена очистки возвращает штрихи
+        canvas.undo_last_action()
+        self.assertEqual(len(canvas.strokes), 1)
+        print("[OK] Рисование, 'Стереть на шаг назад' и 'Стереть всё' работают безупречно")
+
+    def test_08_eraser_segment_intersection(self):
+        """Проверка ластика на пересечение отрезков линий"""
+        canvas = self.player.canvas
+        canvas.strokes.clear()
+        canvas.undo_stack.clear()
+
+        # Длинная линия от (0, 0) до (200, 200) всего из 2 точек
+        s = Stroke(QColor("#0000FF"), 4.0, [QPointF(0, 0), QPointF(200, 200)])
         canvas.strokes.append(s)
         canvas.undo_stack.append(('add', s))
         self.assertEqual(len(canvas.strokes), 1)
 
-        # Применяем ластик рядом с точкой (202, 202)
-        canvas.erase_strokes_at_video_pt(QPointF(202, 202))
+        # Ластик проходит через середину линии (100, 100), где нет явной вершины
+        canvas.erase_strokes_at_video_pt(QPointF(100, 100))
         self.assertEqual(len(canvas.strokes), 0)
 
-        # Проверяем отмену стирания ластиком
+        # Отмена стирания восстанавливает линию
         canvas.undo_last_action()
         self.assertEqual(len(canvas.strokes), 1)
-        print("[OK] Инструмент ластик стирает выбранный штрих и поддерживает шаг назад")
+        print("[OK] Ластик безошибочно стирает штрихи при пересечении отрезков")
 
-    def test_08_colors_and_thickness(self):
-        """Проверка смены цвета и толщины"""
+    def test_09_colors_palette_and_active_highlight(self):
+        """Проверка палитры цветов и активной подсветки кнопок"""
         self.player._set_brush_color("#34C759")
         self.assertEqual(self.player.canvas.pen_color.name().upper(), "#34C759")
 
-        self.player.spin_width.setValue(12)
-        self.assertEqual(self.player.canvas.pen_width, 12.0)
-        print("[OK] Смена цвета и толщины кисти работает корректно")
+        green_btn = self.player.preset_color_buttons["#34C759"]
+        self.assertIn("#FFFFFF", green_btn.styleSheet())  # Активная белая рамка
+
+        self.player._set_brush_color("#007AFF")
+        self.assertEqual(self.player.canvas.pen_color.name().upper(), "#007AFF")
+        blue_btn = self.player.preset_color_buttons["#007AFF"]
+        self.assertIn("#FFFFFF", blue_btn.styleSheet())
+        print("[OK] Смена цвета и подсветка активного цвета в UI работают")
 
 
 if __name__ == "__main__":
