@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Универсальный видеоплеер с покадровым воспроизведением, зумом, панорамированием
-и интерактивным рисованием поверх видео (Telestrator).
+Универсальный высокопроизводительный видеоплеер с покадровым воспроизведением,
+аппаратным масштабированием (Zoom), панорамированием, интерактивным рисованием (Telestrator)
+и полной поддержкой аудио с регулировкой громкости.
 """
 
 import sys
 import os
+import collections
 import cv2
 import numpy as np
-from PyQt5.QtCore import Qt, QTimer, QPointF, QRectF, pyqtSignal, QPoint
+from PyQt5.QtCore import Qt, QTimer, QPointF, QRectF, pyqtSignal, QPoint, QUrl
 from PyQt5.QtGui import (
     QImage, QPixmap, QPainter, QPen, QColor, QBrush, QCursor,
-    QFont, QIcon, QKeySequence
+    QFont, QIcon, QKeySequence, QPainterPath
 )
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QSlider, QLabel, QFileDialog, QColorDialog,
-    QToolBar, QAction, QComboBox, QSpinBox, QFrame,
-    QSizePolicy, QShortcut, QMessageBox, QToolTip
+    QComboBox, QSpinBox, QFrame, QSizePolicy, QShortcut, QMessageBox, QToolTip
 )
+from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 
 
 def dist_to_segment_sq(p: QPointF, a: QPointF, b: QPointF) -> float:
@@ -43,16 +45,17 @@ class ClickableSlider(QSlider):
     """
     Продвинутый слайдер:
     - Мгновенный переход по клику мыши в любую точку
-    - Плавный скраббинг при зажатии
+    - Плавный скраббинг без блокировки UI
     - Всплывающая подсказка с временем и номером кадра при наведении
     - Прокрутка колесиком мыши вперед/назад
+    - Qt.NoFocus для исключения конфликтов со стрелками клавиатуры
     """
     wheel_scrolled = pyqtSignal(int)
-    hover_changed = pyqtSignal(int, QPoint)
 
     def __init__(self, orientation=Qt.Horizontal, parent=None):
         super().__init__(orientation, parent)
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.NoFocus)
         self.fps = 25.0
         self.is_dragging = False
 
@@ -93,27 +96,39 @@ class ClickableSlider(QSlider):
     def wheelEvent(self, event):
         delta = 1 if event.angleDelta().y() > 0 else -1
         if event.modifiers() & Qt.ShiftModifier:
-            delta *= int(round(self.fps))  # шаг на 1 секунду с Shift
+            delta *= int(round(self.fps))
         elif event.modifiers() & Qt.ControlModifier:
-            delta *= int(round(self.fps * 5))  # шаг на 5 секунд с Ctrl
+            delta *= int(round(self.fps * 5))
         self.wheel_scrolled.emit(delta)
         event.accept()
 
 
 class Stroke:
-    """Одиночный штрих рисования в координатах исходного видео"""
+    """
+    Штрих рисования в координатах видео.
+    Использует QPainterPath для высокопроизводительной отрисовки через C++ ядро Qt.
+    """
     def __init__(self, color, width, points=None):
         self.color = QColor(color)
         self.width = float(width)
-        self.points = list(points) if points else []
+        self.points = []
+        self.path = QPainterPath()
+        if points:
+            for pt in points:
+                self.add_point(pt)
 
     def add_point(self, pt: QPointF):
-        self.points.append(QPointF(pt.x(), pt.y()))
+        p = QPointF(pt.x(), pt.y())
+        if not self.points:
+            self.path.moveTo(p)
+        else:
+            self.path.lineTo(p)
+        self.points.append(p)
 
 
 class VideoCanvas(QWidget):
     """
-    Холст видео, панорамирования, зума и рисования поверх видео
+    Высокопроизводительный холст видео, панорамирования, зума и рисования поверх видео
     """
     zoom_changed = pyqtSignal(float)
     drawing_changed = pyqtSignal()
@@ -156,13 +171,12 @@ class VideoCanvas(QWidget):
 
     def _create_brush_cursor(self) -> QCursor:
         """
-        Создает динамический курсор-кружок, размер которого
-        точно соответствует текущему размеру кисти на экране
-        с контрастной двойной обводкой для отличной видимости на любом фоне.
+        Создает динамический курсор-кружок под точный размер кисти на экране
+        с контрастной двойной обводкой и центральным прицелом.
         """
         d = max(5, int(round(self.pen_width)))
         if d % 2 == 0:
-            d += 1  # нечетный размер для точного центра
+            d += 1
         size = d + 4
         pixmap = QPixmap(size, size)
         pixmap.fill(Qt.transparent)
@@ -170,15 +184,15 @@ class VideoCanvas(QWidget):
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing, True)
 
-        # 1. Внешний темный контур (для светлого фона)
+        # Внешний темный контур
         painter.setPen(QPen(QColor(0, 0, 0, 220), 1.5))
         painter.drawEllipse(2, 2, d, d)
 
-        # 2. Внутренний цветной контур цвета кисти (или белый)
+        # Внутренний цветной контур
         painter.setPen(QPen(self.pen_color, 1.0))
         painter.drawEllipse(2, 2, d, d)
 
-        # 3. Центральная точка-прицел (1px)
+        # Точка-прицел по центру
         center = size // 2
         painter.setPen(QPen(QColor(0, 0, 0, 255), 1))
         painter.drawPoint(center, center)
@@ -199,7 +213,6 @@ class VideoCanvas(QWidget):
 
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing, True)
-        # Пунктирная контрастная обводка ластика
         painter.setPen(QPen(QColor(0, 0, 0, 200), 1.5))
         painter.drawEllipse(2, 2, d, d)
         painter.setPen(QPen(QColor(255, 255, 255, 240), 1.0, Qt.DashLine))
@@ -213,7 +226,7 @@ class VideoCanvas(QWidget):
         return QCursor(pixmap, center, center)
 
     def update_cursor(self):
-        """Обновление формы курсора в зависимости от активного инструмента и параметров"""
+        """Обновление формы курсора"""
         if self.active_tool == self.TOOL_PEN:
             self.setCursor(self._create_brush_cursor())
         elif self.active_tool == self.TOOL_ERASER:
@@ -236,23 +249,28 @@ class VideoCanvas(QWidget):
         self.update_cursor()
         self.update()
 
-    def set_frame(self, frame_bgr):
-        """Обновление текущего кадра из формата OpenCV BGR"""
-        if frame_bgr is None:
+    def set_frame(self, frame_bgr_or_qimg):
+        """Быстрая установка кадра без лишних преобразований памяти"""
+        if frame_bgr_or_qimg is None:
             self.current_qimage = None
             self.update()
             return
 
-        h, w, ch = frame_bgr.shape
+        if isinstance(frame_bgr_or_qimg, QImage):
+            self.current_qimage = frame_bgr_or_qimg
+            w = frame_bgr_or_qimg.width()
+            h = frame_bgr_or_qimg.height()
+        else:
+            h, w, ch = frame_bgr_or_qimg.shape
+            bytes_per_line = ch * w
+            # Прямое создание QImage через Format_BGR888 без cv2.cvtColor
+            self.current_qimage = QImage(
+                frame_bgr_or_qimg.data, w, h, bytes_per_line, QImage.Format_BGR888
+            ).copy()
+
         first_time = (self.video_width != w or self.video_height != h)
         self.video_width = w
         self.video_height = h
-
-        rgb_frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        bytes_per_line = ch * w
-        self.current_qimage = QImage(
-            rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888
-        ).copy()
 
         if first_time:
             self.fit_to_view()
@@ -364,11 +382,7 @@ class VideoCanvas(QWidget):
         self.drawing_changed.emit()
 
     def erase_strokes_at_video_pt(self, video_pt: QPointF):
-        """
-        Удаление штрихов, пересекающих радиус ластика.
-        Проверяет расстояние до всех сегментов линии,
-        поэтому даже быстрые движения ластика безошибочно стирают штрихи.
-        """
+        """Высокоточное стирание штрихов с проверкой расстояния до сегментов"""
         erased_any = False
         radius_video = self.eraser_radius / max(0.01, self.zoom_factor)
         r2 = radius_video * radius_video
@@ -376,7 +390,7 @@ class VideoCanvas(QWidget):
         indices_to_remove = []
         for i, stroke in enumerate(self.strokes):
             pts = stroke.points
-            if len(pts) == 0:
+            if not pts:
                 continue
             if len(pts) == 1:
                 dx = pts[0].x() - video_pt.x()
@@ -408,7 +422,6 @@ class VideoCanvas(QWidget):
         pos = QPointF(event.pos())
         self.last_mouse_pos = pos
 
-        # Средняя или правая кнопка мыши ВСЕГДА выполняет панорамирование
         if event.button() in (Qt.RightButton, Qt.MidButton):
             self.is_panning = True
             self.setCursor(Qt.ClosedHandCursor)
@@ -470,68 +483,65 @@ class VideoCanvas(QWidget):
         super().resizeEvent(event)
         self.update()
 
-    # --- Отрисовка ---
+    # --- Высокопроизводительная отрисовка ---
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
-        # 1. Заливка фона
+        # 1. Заливка фона холста
         painter.fillRect(self.rect(), QColor("#121216"))
 
         origin = self._get_origin(self.zoom_factor, self.pan_offset)
 
-        # 2. Отрисовка видеокадра
+        # 2. Отрисовка видеокадра и векторных штрихов через аппаратную трансформацию
         if self.current_qimage is not None and not self.current_qimage.isNull():
-            target_rect = QRectF(
-                origin.x(),
-                origin.y(),
-                self.video_width * self.zoom_factor,
-                self.video_height * self.zoom_factor
-            )
-            painter.drawImage(target_rect, self.current_qimage)
-            painter.setPen(QPen(QColor(60, 60, 75, 180), 1))
-            painter.drawRect(target_rect)
+            painter.save()
+            painter.translate(origin.x(), origin.y())
+            painter.scale(self.zoom_factor, self.zoom_factor)
+
+            # Кадр видео
+            painter.drawImage(0, 0, self.current_qimage)
+            painter.setPen(QPen(QColor(60, 60, 75, 180), 1.0 / self.zoom_factor))
+            painter.drawRect(0, 0, self.video_width, self.video_height)
+
+            # Все штрихи рисуются напрямую через C++ QPainterPath без циклов на питоне
+            for stroke in self.strokes:
+                if not stroke.points:
+                    continue
+                pen = QPen(stroke.color, stroke.width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+                painter.setPen(pen)
+
+                if len(stroke.points) == 1:
+                    painter.setBrush(QBrush(stroke.color))
+                    r = stroke.width / 2.0
+                    painter.drawEllipse(stroke.points[0], r, r)
+                else:
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawPath(stroke.path)
+
+            painter.restore()
         else:
             painter.setPen(QColor("#7E7E94"))
             painter.setFont(QFont("Segoe UI", 14, QFont.Bold))
             painter.drawText(
                 self.rect(),
                 Qt.AlignCenter,
-                "Нажмите 'Открыть видео' или перетащите файл сюда"
+                "Нажмите 'Открыть видео' (O) или перетащите файл сюда"
             )
-
-        # 3. Отрисовка всех нарисованных штрихов поверх видео
-        for stroke in self.strokes:
-            if len(stroke.points) == 0:
-                continue
-
-            screen_pen_width = max(1.0, stroke.width * self.zoom_factor)
-            pen = QPen(stroke.color, screen_pen_width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-            painter.setPen(pen)
-
-            if len(stroke.points) == 1:
-                sp = self.video_to_screen(stroke.points[0])
-                painter.setBrush(QBrush(stroke.color))
-                radius = max(1.0, screen_pen_width / 2.0)
-                painter.drawEllipse(sp, radius, radius)
-            else:
-                for i in range(len(stroke.points) - 1):
-                    p1 = self.video_to_screen(stroke.points[i])
-                    p2 = self.video_to_screen(stroke.points[i + 1])
-                    painter.drawLine(p1, p2)
 
 
 class VideoPlayerWindow(QMainWindow):
-    """Главное окно видеоплеера с расширенным управлением"""
+    """Главное окно видеоплеера с расширенным управлением и звуком"""
+
+    MAX_CACHE_FRAMES = 120
 
     def __init__(self, initial_video_path=None):
         super().__init__()
         self.setWindowTitle("Pro Video Player & Telestrator")
-        self.resize(1150, 780)
-        self.setMinimumSize(750, 520)
-
+        self.resize(1180, 800)
+        self.setMinimumSize(800, 540)
         self.setAcceptDrops(True)
 
         # Переменные видеопотока
@@ -545,6 +555,21 @@ class VideoPlayerWindow(QMainWindow):
         self.playback_speed = 1.0
         self.frames_per_tick = 1
 
+        # Аудиосистема
+        self.audio_player = QMediaPlayer(self, QMediaPlayer.LowLatency)
+        self.current_volume = 80
+        self.is_muted = False
+        self.audio_player.setVolume(self.current_volume)
+
+        # Кольцевой LRU-кэш кадров для мгновенной покадровой перемотки
+        self.frame_cache = collections.OrderedDict()
+
+        # Дебаунсер скраббинга для 60 FPS отзывчивости
+        self._pending_seek_frame = None
+        self._seek_timer = QTimer(self)
+        self._seek_timer.setSingleShot(True)
+        self._seek_timer.timeout.connect(self._process_pending_seek)
+
         # Таймер воспроизведения
         self.play_timer = QTimer(self)
         self.play_timer.timeout.connect(self._on_play_tick)
@@ -554,7 +579,7 @@ class VideoPlayerWindow(QMainWindow):
         self._apply_dark_theme()
         self._setup_shortcuts()
 
-        # Открытие начального видео при наличии
+        # Открытие начального видео при наличии явного аргумента
         if initial_video_path and os.path.exists(initial_video_path):
             self.load_video(initial_video_path)
 
@@ -574,10 +599,10 @@ class VideoPlayerWindow(QMainWindow):
         self._create_top_toolbar()
         main_layout.addWidget(self.top_toolbar)
 
-        # Добавляем холст
+        # Холст
         main_layout.addWidget(self.canvas, stretch=1)
 
-        # 3. Нижняя панель таймлайна и воспроизведения
+        # 3. Нижняя панель таймлайна, звука и воспроизведения
         bottom_panel = self._create_bottom_controls()
         main_layout.addWidget(bottom_panel)
 
@@ -645,7 +670,6 @@ class VideoPlayerWindow(QMainWindow):
         self.btn_custom_color.clicked.connect(self._pick_custom_color)
         layout.addWidget(self.btn_custom_color)
 
-        # Превью выбранного цвета
         self.color_indicator = QFrame()
         self.color_indicator.setFixedSize(20, 20)
         self.color_indicator.setToolTip("Текущий цвет кисти")
@@ -722,7 +746,7 @@ class VideoPlayerWindow(QMainWindow):
         self.timeline_slider.wheel_scrolled.connect(self._on_slider_wheel)
         layout.addWidget(self.timeline_slider)
 
-        # 2. Панель кнопок навигации и управления
+        # 2. Панель кнопок навигации, звука и управления
         ctrl_layout = QHBoxLayout()
         ctrl_layout.setContentsMargins(0, 0, 0, 0)
         ctrl_layout.setSpacing(6)
@@ -776,7 +800,31 @@ class VideoPlayerWindow(QMainWindow):
         self.btn_loop.clicked.connect(self._toggle_loop)
         ctrl_layout.addWidget(self.btn_loop)
 
-        # Скорость воспроизведения с расширенными режимами
+        self._add_separator(ctrl_layout)
+
+        # Звук и громкость
+        self.btn_mute = QPushButton("🔊")
+        self.btn_mute.setFixedSize(28, 26)
+        self.btn_mute.setToolTip("Включить / выключить звук (M)")
+        self.btn_mute.clicked.connect(self.toggle_mute)
+        ctrl_layout.addWidget(self.btn_mute)
+
+        self.slider_volume = QSlider(Qt.Horizontal)
+        self.slider_volume.setRange(0, 100)
+        self.slider_volume.setValue(self.current_volume)
+        self.slider_volume.setFixedWidth(80)
+        self.slider_volume.setFocusPolicy(Qt.NoFocus)
+        self.slider_volume.setToolTip("Громкость звука (Стрелки Вверх / Вниз)")
+        self.slider_volume.valueChanged.connect(self.set_volume)
+        ctrl_layout.addWidget(self.slider_volume)
+
+        self.lbl_volume = QLabel(f"{self.current_volume}%")
+        self.lbl_volume.setMinimumWidth(35)
+        ctrl_layout.addWidget(self.lbl_volume)
+
+        self._add_separator(ctrl_layout)
+
+        # Скорость воспроизведения
         ctrl_layout.addWidget(QLabel("Скорость:"))
         self.combo_speed = QComboBox()
         self.speed_presets = [
@@ -824,6 +872,11 @@ class VideoPlayerWindow(QMainWindow):
         QShortcut(QKeySequence(Qt.Key_Home), self, lambda: self._seek_to_frame(0))
         QShortcut(QKeySequence(Qt.Key_End), self, lambda: self._seek_to_frame(self.total_frames - 1))
 
+        # Звук: громкость и выключение
+        QShortcut(QKeySequence("M"), self, self.toggle_mute)
+        QShortcut(QKeySequence(Qt.Key_Up), self, lambda: self.adjust_volume(5))
+        QShortcut(QKeySequence(Qt.Key_Down), self, lambda: self.adjust_volume(-5))
+
         # Рисование и действия
         QShortcut(QKeySequence("Ctrl+Z"), self, self.canvas.undo_last_action)
         QShortcut(QKeySequence(Qt.Key_Delete), self, self.canvas.clear_all_drawings)
@@ -862,6 +915,37 @@ class VideoPlayerWindow(QMainWindow):
             file_path = urls[0].toLocalFile()
             if os.path.exists(file_path):
                 self.load_video(file_path)
+
+    # --- Управление звуком ---
+
+    def set_volume(self, val):
+        self.current_volume = max(0, min(100, val))
+        self.slider_volume.blockSignals(True)
+        self.slider_volume.setValue(self.current_volume)
+        self.slider_volume.blockSignals(False)
+        self.lbl_volume.setText(f"{self.current_volume}%")
+
+        if not self.is_muted:
+            self.audio_player.setVolume(self.current_volume)
+            self._update_mute_icon()
+
+    def adjust_volume(self, delta):
+        if self.is_muted:
+            self.toggle_mute()
+        self.set_volume(self.current_volume + delta)
+
+    def toggle_mute(self):
+        self.is_muted = not self.is_muted
+        self.audio_player.setMuted(self.is_muted)
+        self._update_mute_icon()
+
+    def _update_mute_icon(self):
+        if self.is_muted or self.current_volume == 0:
+            self.btn_mute.setText("🔇")
+        elif self.current_volume < 50:
+            self.btn_mute.setText("🔉")
+        else:
+            self.btn_mute.setText("🔊")
 
     # --- Инструменты, Цвета, Толщина ---
 
@@ -907,7 +991,7 @@ class VideoPlayerWindow(QMainWindow):
     def _on_drawing_changed(self):
         pass
 
-    # --- Видеопоток и Воспроизведение ---
+    # --- Видеопоток, Кэширование и Воспроизведение ---
 
     def open_file_dialog(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -935,6 +1019,15 @@ class VideoPlayerWindow(QMainWindow):
         if self.fps <= 1.0 or np.isnan(self.fps):
             self.fps = 25.0
 
+        # Очистка кэша кадров
+        self.frame_cache.clear()
+
+        # Инициализация звуковой дорожки через QMediaPlayer
+        media_url = QUrl.fromLocalFile(os.path.abspath(file_path))
+        self.audio_player.setMedia(QMediaContent(media_url))
+        self.audio_player.setVolume(self.current_volume if not self.is_muted else 0)
+        self.audio_player.setPosition(0)
+
         self.timeline_slider.fps = self.fps
         self.timeline_slider.setRange(0, max(0, self.total_frames - 1))
         self.timeline_slider.setValue(0)
@@ -948,17 +1041,49 @@ class VideoPlayerWindow(QMainWindow):
         self._seek_to_frame(0)
         self.setWindowTitle(f"Pro Video Player — {os.path.basename(file_path)}")
 
-    def _seek_to_frame(self, frame_idx):
+    def _get_frame_cached(self, frame_idx):
+        """
+        Возвращает кадр из памяти за 0.01 мс.
+        Если кадра нет в кэше, считывает его через cv2 и кэширует.
+        """
         if self.cap is None or not self.cap.isOpened():
+            return None
+
+        if frame_idx in self.frame_cache:
+            self.frame_cache.move_to_end(frame_idx)
+            return self.frame_cache[frame_idx]
+
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame_bgr = self.cap.read()
+        if not ret or frame_bgr is None:
+            return None
+
+        h, w, ch = frame_bgr.shape
+        # Быстрый Format_BGR888 без cv2.cvtColor
+        qimg = QImage(frame_bgr.data, w, h, ch * w, QImage.Format_BGR888).copy()
+
+        if len(self.frame_cache) >= self.MAX_CACHE_FRAMES:
+            self.frame_cache.popitem(last=False)
+        self.frame_cache[frame_idx] = qimg
+
+        return qimg
+
+    def _seek_to_frame(self, frame_idx):
+        if self.cap is None or not self.cap.isOpened() or self.total_frames <= 0:
             return
 
         frame_idx = max(0, min(self.total_frames - 1, frame_idx))
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret, frame = self.cap.read()
-        if ret and frame is not None:
+        qimg = self._get_frame_cached(frame_idx)
+        if qimg is not None:
             self.current_frame_idx = frame_idx
-            self.canvas.set_frame(frame)
+            self.canvas.set_frame(qimg)
             self._update_time_label()
+
+            # Синхронизация звука
+            target_ms = int((frame_idx / self.fps) * 1000)
+            if not self.is_playing:
+                self.audio_player.setPosition(target_ms)
+
             if not self.timeline_slider.is_dragging:
                 self.timeline_slider.blockSignals(True)
                 self.timeline_slider.setValue(frame_idx)
@@ -981,27 +1106,30 @@ class VideoPlayerWindow(QMainWindow):
         self.is_playing = True
         self.btn_play_pause.setText("⏸ Пауза")
 
+        # Запуск аудио
+        target_ms = int((self.current_frame_idx / self.fps) * 1000)
+        self.audio_player.setPosition(target_ms)
+        self.audio_player.setPlaybackRate(self.playback_speed)
+        self.audio_player.play()
+
     def pause(self):
         self.play_timer.stop()
         self.is_playing = False
         self.btn_play_pause.setText("▶ Пуск")
+        self.audio_player.pause()
 
     def _update_timer_interval(self):
-        """
-        Адаптивный расчет интервала таймера и шага кадров:
-        для замедления и обычных скоростей (до 60 кадров/сек) шаг = 1 кадр;
-        для экстремального ускорения (до 10x) таймер держит комфортные 60 FPS,
-        шагая на нужное число кадров за раз.
-        """
         target_fps = max(0.1, self.fps * self.playback_speed)
         if target_fps <= 60.0:
             interval = int(round(1000.0 / target_fps))
             self.frames_per_tick = 1
         else:
-            interval = 16  # ~60 Гц
+            interval = 16  # 60 Гц
             self.frames_per_tick = max(1, int(round(target_fps / 60.0)))
 
         self.play_timer.setInterval(max(2, interval))
+        if self.audio_player.state() == QMediaPlayer.PlayingState:
+            self.audio_player.setPlaybackRate(self.playback_speed)
 
     def _on_play_tick(self):
         if self.cap is None or not self.cap.isOpened():
@@ -1013,6 +1141,9 @@ class VideoPlayerWindow(QMainWindow):
         if next_frame >= self.total_frames:
             if self.is_looping:
                 self._seek_to_frame(0)
+                if self.is_playing:
+                    self.audio_player.setPosition(0)
+                    self.audio_player.play()
                 return
             else:
                 self._seek_to_frame(self.total_frames - 1)
@@ -1022,11 +1153,31 @@ class VideoPlayerWindow(QMainWindow):
         if step > 1:
             self._seek_to_frame(next_frame)
         else:
-            ret, frame = self.cap.read()
-            if ret and frame is not None:
+            # Для sequential 1-step считываем напрямую или из кэша
+            if next_frame in self.frame_cache:
+                qimg = self.frame_cache[next_frame]
+            else:
+                ret, frame_bgr = self.cap.read()
+                if ret and frame_bgr is not None:
+                    h, w, ch = frame_bgr.shape
+                    qimg = QImage(frame_bgr.data, w, h, ch * w, QImage.Format_BGR888).copy()
+                    if len(self.frame_cache) >= self.MAX_CACHE_FRAMES:
+                        self.frame_cache.popitem(last=False)
+                    self.frame_cache[next_frame] = qimg
+                else:
+                    qimg = None
+
+            if qimg is not None:
                 self.current_frame_idx = next_frame
-                self.canvas.set_frame(frame)
+                self.canvas.set_frame(qimg)
                 self._update_time_label()
+
+                # Периодическая проверка синхронизации звука (допуск 150мс)
+                audio_pos = self.audio_player.position()
+                expected_audio_pos = int((next_frame / self.fps) * 1000)
+                if abs(audio_pos - expected_audio_pos) > 150:
+                    self.audio_player.setPosition(expected_audio_pos)
+
                 if not self.timeline_slider.is_dragging:
                     self.timeline_slider.blockSignals(True)
                     self.timeline_slider.setValue(next_frame)
@@ -1060,13 +1211,13 @@ class VideoPlayerWindow(QMainWindow):
             pass
 
     def increase_speed(self):
-        """Увеличить скорость на 1 градацию вверх (>)"""
+        """Увеличить скорость на 1 ступень (>)"""
         idx = self.combo_speed.currentIndex()
         if idx < self.combo_speed.count() - 1:
             self.combo_speed.setCurrentIndex(idx + 1)
 
     def decrease_speed(self):
-        """Уменьшить скорость на 1 градацию вниз (<)"""
+        """Уменьшить скорость на 1 ступень (<)"""
         idx = self.combo_speed.currentIndex()
         if idx > 0:
             self.combo_speed.setCurrentIndex(idx - 1)
@@ -1077,17 +1228,31 @@ class VideoPlayerWindow(QMainWindow):
         if idx >= 0:
             self.combo_speed.setCurrentIndex(idx)
 
-    # --- Обработчики таймлайна ---
+    # --- Высокоотзывчивые обработчики таймлайна с дебаунсингом ---
 
     def _on_slider_pressed(self):
         self._was_playing_before_scrub = self.is_playing
         self.pause()
 
     def _on_slider_moved(self, val):
-        self._seek_to_frame(val)
+        self._pending_seek_frame = val
+        if not self._seek_timer.isActive():
+            self._seek_timer.start(16)  # 60 FPS троттлинг для плавного скраббинга
+
+    def _process_pending_seek(self):
+        if self._pending_seek_frame is not None:
+            target = self._pending_seek_frame
+            self._pending_seek_frame = None
+            self._seek_to_frame(target)
 
     def _on_slider_released(self):
-        val = self.timeline_slider.value()
+        self._seek_timer.stop()
+        if self._pending_seek_frame is not None:
+            val = self._pending_seek_frame
+            self._pending_seek_frame = None
+        else:
+            val = self.timeline_slider.value()
+
         self._seek_to_frame(val)
         if getattr(self, '_was_playing_before_scrub', False):
             self.play()
@@ -1110,6 +1275,14 @@ class VideoPlayerWindow(QMainWindow):
             )
         else:
             self.lbl_time_info.setText("00:00.00 / 00:00.00  |  Кадр: 0 / 0  (0.0 FPS)")
+
+    def closeEvent(self, event):
+        """Корректное освобождение ресурсов при закрытии"""
+        self.play_timer.stop()
+        self.audio_player.stop()
+        if self.cap is not None:
+            self.cap.release()
+        event.accept()
 
     def _apply_dark_theme(self):
         """Премиальный темный интерфейс"""

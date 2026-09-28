@@ -270,6 +270,60 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         empty_player.close()
         print("[OK] Плеер без видео по дефолту запускается чисто и безопасно")
 
+    def test_12_audio_and_volume_controls(self):
+        """Проверка аудиосистемы, регулировки громкости и Mute"""
+        self.assertIsNotNone(self.player.audio_player)
+        self.assertEqual(self.player.current_volume, 80)
+        self.assertFalse(self.player.is_muted)
+
+        # Регулировка громкости слайдером
+        self.player.set_volume(50)
+        self.assertEqual(self.player.current_volume, 50)
+        self.assertEqual(self.player.slider_volume.value(), 50)
+        self.assertEqual(self.player.lbl_volume.text(), "50%")
+
+        # Прибавление / убавление громкости (клавиши Up/Down)
+        self.player.adjust_volume(10)
+        self.assertEqual(self.player.current_volume, 60)
+        self.player.adjust_volume(-25)
+        self.assertEqual(self.player.current_volume, 35)
+
+        # Включение Mute (M)
+        self.player.toggle_mute()
+        self.assertTrue(self.player.is_muted)
+        self.assertEqual(self.player.btn_mute.text(), "🔇")
+
+        # Отключение Mute
+        self.player.toggle_mute()
+        self.assertFalse(self.player.is_muted)
+        self.assertEqual(self.player.current_volume, 35)
+        print("[OK] Регулировка громкости и кнопка Mute работают безупречно")
+
+    def test_13_frame_cache_performance(self):
+        """Проверка кольцевого LRU кэша кадров (0 мс доступ)"""
+        self.player.frame_cache.clear()
+        self.assertEqual(len(self.player.frame_cache), 0)
+
+        # Считывание кадра 5 (кэш miss -> сохранение в кэш)
+        f5 = self.player._get_frame_cached(5)
+        self.assertIsNotNone(f5)
+        self.assertIn(5, self.player.frame_cache)
+
+        # Повторный доступ к кадру 5 (кэш hit)
+        f5_cached = self.player._get_frame_cached(5)
+        self.assertIs(f5, f5_cached)
+        print("[OK] LRU кэш кадров обеспечивает мгновенный доступ без повторного I/O")
+
+    def test_14_painter_path_acceleration(self):
+        """Проверка аппаратного ускорения рисования через QPainterPath"""
+        stroke = Stroke(QColor("#FF0000"), 4.0, [QPointF(0, 0), QPointF(100, 100), QPointF(200, 50)])
+        self.assertGreater(stroke.path.elementCount(), 1)
+        self.player.canvas.strokes.append(stroke)
+
+        # Проверка вызова paintEvent с новой матричной трансформацией без ошибок
+        self.player.canvas.repaint()
+        print("[OK] Векторная отрисовка через QPainterPath и transform работает без ошибок")
+
 
 if __name__ == "__main__":
     unittest.main()
