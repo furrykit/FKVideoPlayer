@@ -3,10 +3,12 @@ import os
 import collections
 import tempfile
 import wave
+import json
+import time
 import av
 import cv2
 import numpy as np
-from PyQt5.QtCore import Qt, QTimer, QPointF, QRectF, pyqtSignal, QPoint, QUrl
+from PyQt5.QtCore import Qt, QTimer, QPointF, QRectF, pyqtSignal, QPoint, QUrl, QThread
 from PyQt5.QtGui import (
     QImage, QPixmap, QPainter, QPen, QColor, QBrush, QCursor,
     QFont, QIcon, QKeySequence, QPainterPath
@@ -14,7 +16,8 @@ from PyQt5.QtGui import (
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QSlider, QLabel, QFileDialog, QColorDialog,
-    QComboBox, QSpinBox, QFrame, QShortcut, QMessageBox, QToolTip
+    QComboBox, QSpinBox, QFrame, QShortcut, QMessageBox, QToolTip,
+    QProgressDialog
 )
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 
@@ -94,7 +97,8 @@ class ClickableSlider(QSlider):
 
 
 class Stroke:
-    def __init__(self, color, width, points=None):
+    def __init__(self, color, width, points=None, stroke_id=None):
+        self.stroke_id = stroke_id
         self.color = QColor(color)
         self.width = float(width)
         self.points = []
@@ -143,6 +147,7 @@ class VideoCanvas(QWidget):
         self.strokes = []
         self.current_stroke = None
         self.undo_stack = []
+        self.recorder = None
 
         self.update_cursor()
 
@@ -315,6 +320,8 @@ class VideoCanvas(QWidget):
             return
         self.undo_stack.append(('clear', list(self.strokes)))
         self.strokes.clear()
+        if self.recorder:
+            self.recorder.record_clear()
         self.update()
         self.drawing_changed.emit()
 
@@ -322,6 +329,8 @@ class VideoCanvas(QWidget):
         if not self.undo_stack:
             if self.strokes:
                 self.strokes.pop()
+                if self.recorder:
+                    self.recorder.record_undo()
                 self.update()
                 self.drawing_changed.emit()
             return
@@ -336,6 +345,9 @@ class VideoCanvas(QWidget):
             self.strokes.insert(idx, stroke)
         elif action_type == 'clear':
             self.strokes = list(payload)
+
+        if self.recorder:
+            self.recorder.record_undo()
 
         self.update()
         self.drawing_changed.emit()
@@ -365,10 +377,16 @@ class VideoCanvas(QWidget):
             if hit:
                 indices_to_remove.append(i)
 
+        erased_ids = []
         for idx in reversed(indices_to_remove):
             removed = self.strokes.pop(idx)
             self.undo_stack.append(('erase', (removed, idx)))
+            if hasattr(removed, 'stroke_id') and removed.stroke_id is not None:
+                erased_ids.append(removed.stroke_id)
             erased_any = True
+
+        if self.recorder and erased_ids:
+            self.recorder.record_erase(erased_ids)
 
         if erased_any:
             self.update()
@@ -390,9 +408,12 @@ class VideoCanvas(QWidget):
             elif self.active_tool == self.TOOL_PEN:
                 vpt = self.screen_to_video(pos)
                 stroke_width_video = max(0.5, self.pen_width / max(0.01, self.zoom_factor))
-                self.current_stroke = Stroke(self.pen_color, stroke_width_video, [vpt])
+                sid = self.recorder.allocate_stroke_id() if self.recorder else len(self.strokes) + 1
+                self.current_stroke = Stroke(self.pen_color, stroke_width_video, [vpt], stroke_id=sid)
                 self.strokes.append(self.current_stroke)
                 self.undo_stack.append(('add', self.current_stroke))
+                if self.recorder:
+                    self.recorder.record_stroke_start(sid, self.pen_color.name(), stroke_width_video, (vpt.x(), vpt.y()))
                 self.update()
                 self.drawing_changed.emit()
             elif self.active_tool == self.TOOL_ERASER:
@@ -413,6 +434,8 @@ class VideoCanvas(QWidget):
             if self.active_tool == self.TOOL_PEN and self.current_stroke:
                 vpt = self.screen_to_video(pos)
                 self.current_stroke.add_point(vpt)
+                if self.recorder:
+                    self.recorder.record_stroke_point(self.current_stroke.stroke_id, (vpt.x(), vpt.y()))
                 self.update()
             elif self.active_tool == self.TOOL_ERASER:
                 vpt = self.screen_to_video(pos)
@@ -426,6 +449,8 @@ class VideoCanvas(QWidget):
             self.update_cursor()
 
         if event.button() == Qt.LeftButton:
+            if self.current_stroke and self.recorder:
+                self.recorder.record_stroke_end(self.current_stroke.stroke_id)
             self.current_stroke = None
 
     def wheelEvent(self, event):
@@ -481,6 +506,396 @@ class VideoCanvas(QWidget):
             )
 
 
+class ActionRecorder:
+    STATE_IDLE = 0
+    STATE_RECORDING = 1
+    STATE_PAUSED = 2
+
+    def __init__(self, player):
+        self.player = player
+        self.state = self.STATE_IDLE
+        self.events = []
+        self.elapsed_time = 0.0
+        self.last_resume_time = 0.0
+        self.last_recorded_frame = -1
+        self.last_zoom = -1.0
+        self.last_pan = (None, None)
+        self._stroke_counter = 0
+
+    def allocate_stroke_id(self) -> int:
+        self._stroke_counter += 1
+        return self._stroke_counter
+
+    def is_recording(self) -> bool:
+        return self.state == self.STATE_RECORDING
+
+    def is_paused(self) -> bool:
+        return self.state == self.STATE_PAUSED
+
+    def is_active(self) -> bool:
+        return self.state in (self.STATE_RECORDING, self.STATE_PAUSED)
+
+    def current_time(self) -> float:
+        if self.state == self.STATE_RECORDING:
+            return round(self.elapsed_time + (time.perf_counter() - self.last_resume_time), 4)
+        return round(self.elapsed_time, 4)
+
+    def start(self):
+        self.events.clear()
+        self.elapsed_time = 0.0
+        self.last_resume_time = time.perf_counter()
+        self.state = self.STATE_RECORDING
+        self._stroke_counter = 0
+        self.last_recorded_frame = -1
+        self.last_zoom = -1.0
+        self.last_pan = (None, None)
+
+        self.record_frame(force=True)
+
+        if hasattr(self.player, 'canvas') and self.player.canvas.strokes:
+            for s in self.player.canvas.strokes:
+                sid = self.allocate_stroke_id()
+                s.stroke_id = sid
+                if s.points:
+                    self.events.append({
+                        'type': 'stroke_start',
+                        'time': 0.0,
+                        'stroke_id': sid,
+                        'color': s.color.name(),
+                        'width': s.width,
+                        'pt': (round(s.points[0].x(), 2), round(s.points[0].y(), 2))
+                    })
+                    for pt in s.points[1:]:
+                        self.events.append({
+                            'type': 'stroke_point',
+                            'time': 0.0,
+                            'stroke_id': sid,
+                            'pt': (round(pt.x(), 2), round(pt.y(), 2))
+                        })
+                    self.events.append({
+                        'type': 'stroke_end',
+                        'time': 0.0,
+                        'stroke_id': sid
+                    })
+
+    def pause(self):
+        if self.state == self.STATE_RECORDING:
+            self.elapsed_time += (time.perf_counter() - self.last_resume_time)
+            self.state = self.STATE_PAUSED
+        elif self.state == self.STATE_PAUSED:
+            self.last_resume_time = time.perf_counter()
+            self.state = self.STATE_RECORDING
+            self.record_frame(force=True)
+
+    def stop(self):
+        if self.state == self.STATE_RECORDING:
+            self.elapsed_time += (time.perf_counter() - self.last_resume_time)
+        self.state = self.STATE_IDLE
+        self.events.append({
+            'type': 'stop',
+            'time': round(self.elapsed_time, 4)
+        })
+
+    def record_frame(self, force=False):
+        if self.state != self.STATE_RECORDING:
+            return
+        t = self.current_time()
+        f_idx = self.player.current_frame_idx
+        zoom = self.player.canvas.zoom_factor if hasattr(self.player, 'canvas') else 1.0
+        pan = (
+            self.player.canvas.pan_offset.x() if hasattr(self.player, 'canvas') else 0.0,
+            self.player.canvas.pan_offset.y() if hasattr(self.player, 'canvas') else 0.0
+        )
+        if not force and f_idx == self.last_recorded_frame and abs(zoom - self.last_zoom) < 1e-3 and pan == self.last_pan:
+            return
+
+        self.last_recorded_frame = f_idx
+        self.last_zoom = zoom
+        self.last_pan = pan
+        self.events.append({
+            'type': 'frame',
+            'time': t,
+            'frame_idx': f_idx,
+            'zoom': round(zoom, 4),
+            'pan': (round(pan[0], 2), round(pan[1], 2))
+        })
+
+    def record_stroke_start(self, stroke_id: int, color_hex: str, width: float, pt: tuple):
+        if self.state != self.STATE_RECORDING:
+            return
+        self.events.append({
+            'type': 'stroke_start',
+            'time': self.current_time(),
+            'stroke_id': stroke_id,
+            'color': color_hex,
+            'width': round(width, 2),
+            'pt': (round(pt[0], 2), round(pt[1], 2))
+        })
+
+    def record_stroke_point(self, stroke_id: int, pt: tuple):
+        if self.state != self.STATE_RECORDING:
+            return
+        self.events.append({
+            'type': 'stroke_point',
+            'time': self.current_time(),
+            'stroke_id': stroke_id,
+            'pt': (round(pt[0], 2), round(pt[1], 2))
+        })
+
+    def record_stroke_end(self, stroke_id: int):
+        if self.state != self.STATE_RECORDING:
+            return
+        self.events.append({
+            'type': 'stroke_end',
+            'time': self.current_time(),
+            'stroke_id': stroke_id
+        })
+
+    def record_undo(self):
+        if self.state != self.STATE_RECORDING:
+            return
+        self.events.append({
+            'type': 'undo',
+            'time': self.current_time()
+        })
+
+    def record_clear(self):
+        if self.state != self.STATE_RECORDING:
+            return
+        self.events.append({
+            'type': 'clear',
+            'time': self.current_time()
+        })
+
+    def record_erase(self, stroke_ids: list):
+        if self.state != self.STATE_RECORDING or not stroke_ids:
+            return
+        self.events.append({
+            'type': 'erase',
+            'time': self.current_time(),
+            'stroke_ids': list(stroke_ids)
+        })
+
+    def to_dict(self) -> dict:
+        return {
+            'video_path': getattr(self.player, 'video_path', ''),
+            'video_fps': getattr(self.player, 'fps', 25.0),
+            'total_frames': getattr(self.player, 'total_frames', 0),
+            'total_duration': round(self.elapsed_time, 4),
+            'event_count': len(self.events),
+            'events': self.events
+        }
+
+    def save_json(self, path: str):
+        data = self.to_dict()
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+    def load_json(self, path: str):
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        self.events = data.get('events', [])
+        self.elapsed_time = float(data.get('total_duration', 0.0))
+        self.state = self.STATE_IDLE
+
+
+class ExportVideoWorker(QThread):
+    progress = pyqtSignal(int, int, str)
+    finished = pyqtSignal(bool, str)
+
+    def __init__(self, video_path, events, total_duration, output_path, fps=30.0, out_size=None):
+        super().__init__()
+        self.video_path = video_path
+        self.events = events
+        self.total_duration = total_duration
+        self.output_path = output_path
+        self.fps = max(10.0, min(60.0, fps))
+        self.out_size = out_size
+        self._is_cancelled = False
+
+    def cancel(self):
+        self._is_cancelled = True
+
+    def run(self):
+        if not self.events or self.total_duration <= 0.05:
+            self.finished.emit(False, "Запись пуста или длительность слишком мала.")
+            return
+
+        cap = None
+        src_w, src_h = 1280, 720
+        if self.video_path and os.path.exists(self.video_path):
+            cap = cv2.VideoCapture(self.video_path)
+            if cap.isOpened():
+                src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            else:
+                cap = None
+
+        if src_w <= 0 or src_h <= 0:
+            src_w, src_h = 1280, 720
+
+        out_w = (src_w // 2) * 2
+        out_h = (src_h // 2) * 2
+
+        use_pyav = True
+        container = None
+        stream = None
+        cv_writer = None
+
+        try:
+            container = av.open(self.output_path, mode='w')
+            stream = container.add_stream('h264', rate=int(round(self.fps)))
+            stream.width = out_w
+            stream.height = out_h
+            stream.pix_fmt = 'yuv420p'
+            stream.options = {'crf': '20', 'preset': 'veryfast'}
+        except Exception:
+            use_pyav = False
+            if container:
+                try:
+                    container.close()
+                except Exception:
+                    pass
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            cv_writer = cv2.VideoWriter(self.output_path, fourcc, self.fps, (out_w, out_h))
+            if not cv_writer.isOpened():
+                if cap:
+                    cap.release()
+                self.finished.emit(False, "Не удалось инициализировать видеокодек для записи.")
+                return
+
+        total_frames = max(1, int(round(self.total_duration * self.fps)))
+        event_idx = 0
+        total_events = len(self.events)
+
+        active_strokes = collections.OrderedDict()
+        current_frame_idx = 0
+        cached_bgr_frame = None
+        cached_frame_idx = -1
+        last_cap_pos = -1
+
+        for frame_num in range(total_frames):
+            if self._is_cancelled:
+                break
+
+            t = frame_num / float(self.fps)
+
+            while event_idx < total_events and self.events[event_idx]['time'] <= t:
+                ev = self.events[event_idx]
+                etype = ev['type']
+                if etype == 'frame':
+                    current_frame_idx = ev['frame_idx']
+                elif etype == 'stroke_start':
+                    sid = ev['stroke_id']
+                    col = QColor(ev['color'])
+                    w = ev['width']
+                    pt = QPointF(ev['pt'][0], ev['pt'][1])
+                    p = QPainterPath()
+                    p.moveTo(pt)
+                    active_strokes[sid] = {
+                        'color': col,
+                        'width': w,
+                        'points': [pt],
+                        'path': p
+                    }
+                elif etype == 'stroke_point':
+                    sid = ev['stroke_id']
+                    if sid in active_strokes:
+                        pt = QPointF(ev['pt'][0], ev['pt'][1])
+                        active_strokes[sid]['points'].append(pt)
+                        active_strokes[sid]['path'].lineTo(pt)
+                elif etype == 'undo':
+                    if active_strokes:
+                        active_strokes.popitem(last=True)
+                elif etype == 'clear':
+                    active_strokes.clear()
+                elif etype == 'erase':
+                    for sid in ev.get('stroke_ids', []):
+                        active_strokes.pop(sid, None)
+                event_idx += 1
+
+            if cap is not None:
+                if current_frame_idx != cached_frame_idx:
+                    if last_cap_pos != current_frame_idx:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame_idx)
+                    ret, read_frame = cap.read()
+                    if ret:
+                        cached_bgr_frame = read_frame
+                        cached_frame_idx = current_frame_idx
+                        last_cap_pos = current_frame_idx + 1
+
+            render_img = QImage(out_w, out_h, QImage.Format_RGB32)
+            painter = QPainter(render_img)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+
+            if cached_bgr_frame is not None:
+                h_f, w_f, ch_f = cached_bgr_frame.shape
+                q_video = QImage(cached_bgr_frame.data, w_f, h_f, ch_f * w_f, QImage.Format_BGR888)
+                painter.drawImage(QRectF(0, 0, out_w, out_h), q_video)
+            else:
+                painter.fillRect(0, 0, out_w, out_h, QColor("#121216"))
+
+            sx = out_w / float(src_w)
+            sy = out_h / float(src_h)
+            painter.save()
+            painter.scale(sx, sy)
+
+            for s in active_strokes.values():
+                pts = s['points']
+                if not pts:
+                    continue
+                pen = QPen(s['color'], s['width'], Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+                painter.setPen(pen)
+                if len(pts) == 1:
+                    painter.setBrush(QBrush(s['color']))
+                    r = s['width'] / 2.0
+                    painter.drawEllipse(pts[0], r, r)
+                else:
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawPath(s['path'])
+
+            painter.restore()
+            painter.end()
+
+            ptr = render_img.bits()
+            ptr.setsize(out_h * out_w * 4)
+            arr = np.frombuffer(ptr, np.uint8).reshape((out_h, out_w, 4))
+            bgr_out = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
+
+            if use_pyav:
+                av_frame = av.VideoFrame.from_ndarray(bgr_out, format='bgr24')
+                for packet in stream.encode(av_frame):
+                    container.mux(packet)
+            else:
+                cv_writer.write(bgr_out)
+
+            if frame_num % 10 == 0 or frame_num == total_frames - 1:
+                self.progress.emit(frame_num + 1, total_frames, f"Экспорт: {frame_num + 1}/{total_frames} кадров")
+
+        if cap:
+            cap.release()
+
+        if use_pyav:
+            if not self._is_cancelled:
+                for packet in stream.encode(None):
+                    container.mux(packet)
+            container.close()
+        else:
+            if cv_writer:
+                cv_writer.release()
+
+        if self._is_cancelled:
+            if os.path.exists(self.output_path):
+                try:
+                    os.remove(self.output_path)
+                except Exception:
+                    pass
+            self.finished.emit(False, "Экспорт отменен.")
+        else:
+            self.finished.emit(True, self.output_path)
+
+
 class FKVideoPlayer(QMainWindow):
     MAX_CACHE_FRAMES = 120
 
@@ -531,6 +946,11 @@ class FKVideoPlayer(QMainWindow):
         self.play_timer = QTimer(self)
         self.play_timer.timeout.connect(self._on_play_tick)
 
+        self.recorder = ActionRecorder(self)
+        self.rec_update_timer = QTimer(self)
+        self.rec_update_timer.timeout.connect(self._on_rec_update_timer)
+        self.export_worker = None
+
         self._init_ui()
         self._apply_dark_theme()
         self._setup_shortcuts()
@@ -546,11 +966,14 @@ class FKVideoPlayer(QMainWindow):
         main_layout.setSpacing(6)
 
         self.canvas = VideoCanvas(self)
+        self.canvas.recorder = self.recorder
         self.canvas.zoom_changed.connect(self._on_canvas_zoom_changed)
         self.canvas.drawing_changed.connect(self._on_drawing_changed)
 
         self._create_top_toolbar()
+        self._create_recording_bar()
         main_layout.addWidget(self.top_toolbar)
+        main_layout.addWidget(self.recording_bar)
         main_layout.addWidget(self.canvas, stretch=1)
 
         bottom_panel = self._create_bottom_controls()
@@ -673,6 +1096,60 @@ class FKVideoPlayer(QMainWindow):
         line.setFrameShadow(QFrame.Sunken)
         line.setStyleSheet("color: #383848; margin: 2px 2px;")
         layout.addWidget(line)
+
+    def _create_recording_bar(self):
+        self.recording_bar = QFrame()
+        self.recording_bar.setObjectName("RecordBar")
+        layout = QHBoxLayout(self.recording_bar)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(6)
+
+        self.btn_rec_start = QPushButton("⏺ Record Actions")
+        self.btn_rec_start.setObjectName("BtnRecord")
+        self.btn_rec_start.setToolTip("Начать запись действий (Ctrl+R)")
+        self.btn_rec_start.clicked.connect(self.start_actions_record)
+        layout.addWidget(self.btn_rec_start)
+
+        self.btn_rec_pause = QPushButton("⏸ Pause Actions Recording")
+        self.btn_rec_pause.setObjectName("BtnPauseRec")
+        self.btn_rec_pause.setToolTip("Приостановить / продолжить запись (Ctrl+Shift+P)")
+        self.btn_rec_pause.setEnabled(False)
+        self.btn_rec_pause.clicked.connect(self.pause_actions_record)
+        layout.addWidget(self.btn_rec_pause)
+
+        self.btn_rec_stop = QPushButton("⏹ Stop Actions Record")
+        self.btn_rec_stop.setObjectName("BtnStopRec")
+        self.btn_rec_stop.setToolTip("Остановить запись действий")
+        self.btn_rec_stop.setEnabled(False)
+        self.btn_rec_stop.clicked.connect(self.stop_actions_record)
+        layout.addWidget(self.btn_rec_stop)
+
+        self._add_separator(layout)
+
+        self.btn_rec_export = QPushButton("💾 Export Recorded Video...")
+        self.btn_rec_export.setObjectName("BtnExportRec")
+        self.btn_rec_export.setToolTip("Экспортировать записанные действия в видео MP4 (Ctrl+E)")
+        self.btn_rec_export.setEnabled(False)
+        self.btn_rec_export.clicked.connect(self.export_recorded_video)
+        layout.addWidget(self.btn_rec_export)
+
+        self.btn_rec_save = QPushButton("📥 Сохранить действия")
+        self.btn_rec_save.setToolTip("Сохранить таймкоды и события в JSON")
+        self.btn_rec_save.setEnabled(False)
+        self.btn_rec_save.clicked.connect(self.save_actions_json)
+        layout.addWidget(self.btn_rec_save)
+
+        self.btn_rec_load = QPushButton("📤 Загрузить действия")
+        self.btn_rec_load.setToolTip("Загрузить сессию действий из JSON")
+        self.btn_rec_load.clicked.connect(self.load_actions_json)
+        layout.addWidget(self.btn_rec_load)
+
+        layout.addStretch(1)
+
+        self.lbl_rec_status = QLabel("● Запись не активна")
+        self.lbl_rec_status.setObjectName("RecStatus")
+        self.lbl_rec_status.setStyleSheet("color: #7E7E94; font-family: Consolas, monospace;")
+        layout.addWidget(self.lbl_rec_status)
 
     def _create_bottom_controls(self):
         panel = QFrame()
@@ -826,6 +1303,10 @@ class FKVideoPlayer(QMainWindow):
         QShortcut(QKeySequence("H"), self, lambda: self._select_tool(VideoCanvas.TOOL_PAN))
         QShortcut(QKeySequence("O"), self, self.open_file_dialog)
 
+        QShortcut(QKeySequence("Ctrl+R"), self, self._shortcut_toggle_record)
+        QShortcut(QKeySequence("Ctrl+Shift+P"), self, self.pause_actions_record)
+        QShortcut(QKeySequence("Ctrl+E"), self, self.export_recorded_video)
+
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
@@ -904,6 +1385,8 @@ class FKVideoPlayer(QMainWindow):
 
     def _on_canvas_zoom_changed(self, zoom):
         self.lbl_zoom.setText(f"{int(round(zoom * 100))}%")
+        if hasattr(self, 'recorder'):
+            self.recorder.record_frame()
 
     def _on_drawing_changed(self):
         pass
@@ -1021,6 +1504,8 @@ class FKVideoPlayer(QMainWindow):
             self.current_frame_idx = frame_idx
             self.canvas.set_frame(qimg)
             self._update_time_label()
+            if hasattr(self, 'recorder'):
+                self.recorder.record_frame()
 
             if not self.timeline_slider.is_dragging:
                 self.timeline_slider.blockSignals(True)
@@ -1111,6 +1596,8 @@ class FKVideoPlayer(QMainWindow):
                 self.current_frame_idx = next_frame
                 self.canvas.set_frame(qimg)
                 self._update_time_label()
+                if hasattr(self, 'recorder'):
+                    self.recorder.record_frame()
 
                 if 0.5 <= self.playback_speed <= 2.0 and not self.is_muted:
                     audio_pos = self.audio_player.position()
@@ -1138,6 +1625,8 @@ class FKVideoPlayer(QMainWindow):
         target = max(0, min(self.total_frames - 1, self.current_frame_idx + delta))
         self.current_frame_idx = target
         self._update_time_label()
+        if hasattr(self, 'recorder'):
+            self.recorder.record_frame()
 
         if not self.timeline_slider.is_dragging:
             self.timeline_slider.blockSignals(True)
@@ -1242,15 +1731,245 @@ class FKVideoPlayer(QMainWindow):
             self.cap.release()
         event.accept()
 
+    def _format_rec_time(self, sec: float) -> str:
+        mins = int(sec // 60)
+        secs = sec % 60
+        return f"{mins:02d}:{secs:04.1f}"
+
+    def start_actions_record(self):
+        if self.recorder.is_active():
+            return
+        if self.recorder.events:
+            reply = QMessageBox.question(
+                self,
+                "Новая запись",
+                "Предыдущая запись действий будет очищена. Начать новую запись?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        self.recorder.start()
+        self.btn_rec_start.setEnabled(False)
+        self.btn_rec_pause.setEnabled(True)
+        self.btn_rec_pause.setText("⏸ Pause Actions Recording")
+        self.btn_rec_stop.setEnabled(True)
+        self.btn_rec_export.setEnabled(False)
+        self.btn_rec_save.setEnabled(False)
+        self.lbl_rec_status.setStyleSheet("color: #FF3B30; font-family: Consolas, monospace; font-weight: bold;")
+        self.lbl_rec_status.setText("● REC 00:00.0 (1 действий)")
+        self.rec_update_timer.start(100)
+
+    def pause_actions_record(self):
+        if not self.recorder.is_active():
+            return
+        self.recorder.pause()
+        if self.recorder.is_paused():
+            self.btn_rec_pause.setText("▶ Resume Actions Recording")
+            self.lbl_rec_status.setStyleSheet("color: #FFCC00; font-family: Consolas, monospace; font-weight: bold;")
+            sec = self.recorder.current_time()
+            cnt = len(self.recorder.events)
+            self.lbl_rec_status.setText(f"❚❚ PAUSED {self._format_rec_time(sec)} ({cnt} действий)")
+        else:
+            self.btn_rec_pause.setText("⏸ Pause Actions Recording")
+            self.lbl_rec_status.setStyleSheet("color: #FF3B30; font-family: Consolas, monospace; font-weight: bold;")
+
+    def stop_actions_record(self):
+        if not self.recorder.is_active():
+            return
+        self.recorder.stop()
+        self.rec_update_timer.stop()
+
+        self.btn_rec_start.setEnabled(True)
+        self.btn_rec_pause.setEnabled(False)
+        self.btn_rec_pause.setText("⏸ Pause Actions Recording")
+        self.btn_rec_stop.setEnabled(False)
+
+        has_events = len(self.recorder.events) > 0 and self.recorder.elapsed_time > 0.05
+        self.btn_rec_export.setEnabled(has_events)
+        self.btn_rec_save.setEnabled(has_events)
+
+        sec = self.recorder.elapsed_time
+        cnt = len(self.recorder.events)
+        self.lbl_rec_status.setStyleSheet("color: #34C759; font-family: Consolas, monospace;")
+        self.lbl_rec_status.setText(f"⏹ Завершено: {self._format_rec_time(sec)} ({cnt} событий)")
+
+        if has_events:
+            reply = QMessageBox.question(
+                self,
+                "Запись завершена",
+                f"Запись действий завершена ({self._format_rec_time(sec)}, {cnt} событий).\nЭкспортировать отредактированное видео сейчас?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            if reply == QMessageBox.Yes:
+                self.export_recorded_video()
+
+    def _on_rec_update_timer(self):
+        if not self.recorder.is_active():
+            self.rec_update_timer.stop()
+            return
+        if self.recorder.is_recording():
+            sec = self.recorder.current_time()
+            cnt = len(self.recorder.events)
+            self.lbl_rec_status.setText(f"● REC {self._format_rec_time(sec)} ({cnt} действий)")
+
+    def _shortcut_toggle_record(self):
+        if self.recorder.is_active():
+            self.stop_actions_record()
+        else:
+            self.start_actions_record()
+
+    def export_recorded_video(self):
+        if not self.recorder.events or self.recorder.elapsed_time <= 0.05:
+            QMessageBox.information(self, "Экспорт", "Нет записанных действий для экспорта.")
+            return
+
+        base_name = "action_export.mp4"
+        dir_name = ""
+        v_path = self.video_path or getattr(self.recorder.player, 'video_path', '')
+        if v_path:
+            v_name = os.path.splitext(os.path.basename(v_path))[0]
+            base_name = f"{v_name}_edited.mp4"
+            dir_name = os.path.dirname(v_path)
+
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Сохранить отредактированное видео",
+            os.path.join(dir_name, base_name),
+            "Видео MP4 (*.mp4);;Все файлы (*.*)"
+        )
+        if not save_path:
+            return
+
+        export_fps = min(60.0, max(24.0, self.fps))
+        progress_dialog = QProgressDialog("Подготовка к экспорту...", "Отмена", 0, 100, self)
+        progress_dialog.setWindowTitle("Экспорт видео")
+        progress_dialog.setWindowModality(Qt.WindowModal)
+        progress_dialog.setMinimumDuration(0)
+        progress_dialog.setValue(0)
+
+        self.export_worker = ExportVideoWorker(
+            video_path=v_path,
+            events=list(self.recorder.events),
+            total_duration=self.recorder.elapsed_time,
+            output_path=save_path,
+            fps=export_fps
+        )
+
+        def on_progress(cur, total, msg):
+            pct = int((cur / max(1, total)) * 100)
+            progress_dialog.setValue(pct)
+            progress_dialog.setLabelText(f"{msg} ({pct}%)")
+
+        def on_finished(success, msg):
+            progress_dialog.close()
+            if success:
+                QMessageBox.information(self, "Экспорт завершен", f"Отредактированное видео успешно сохранено:\n{msg}")
+            else:
+                QMessageBox.warning(self, "Экспорт", f"Не удалось завершить экспорт:\n{msg}")
+
+        progress_dialog.canceled.connect(self.export_worker.cancel)
+        self.export_worker.progress.connect(on_progress)
+        self.export_worker.finished.connect(on_finished)
+        self.export_worker.start()
+
+    def save_actions_json(self):
+        if not self.recorder.events:
+            QMessageBox.information(self, "Сохранение", "Нет записанных действий.")
+            return
+
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Сохранить действия (JSON)",
+            "actions_recording.json",
+            "Файлы JSON (*.json);;Все файлы (*.*)"
+        )
+        if save_path:
+            try:
+                self.recorder.save_json(save_path)
+                QMessageBox.information(self, "Сохранено", f"Действия сохранены в:\n{save_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить файл:\n{e}")
+
+    def load_actions_json(self):
+        load_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Загрузить действия (JSON)",
+            "",
+            "Файлы JSON (*.json);;Все файлы (*.*)"
+        )
+        if load_path:
+            try:
+                self.recorder.load_json(load_path)
+                has_events = len(self.recorder.events) > 0 and self.recorder.elapsed_time > 0.05
+                self.btn_rec_export.setEnabled(has_events)
+                self.btn_rec_save.setEnabled(has_events)
+                sec = self.recorder.elapsed_time
+                cnt = len(self.recorder.events)
+                self.lbl_rec_status.setStyleSheet("color: #34C759; font-family: Consolas, monospace;")
+                self.lbl_rec_status.setText(f"📂 Загружено: {self._format_rec_time(sec)} ({cnt} событий)")
+                QMessageBox.information(self, "Загружено", f"Загружено {cnt} событий ({self._format_rec_time(sec)}).\nТеперь можно экспортировать в видео.")
+            except Exception as e:
+                QMessageBox.critical(self, "Ошибка", f"Не удалось прочитать файл:\n{e}")
+
     def _apply_dark_theme(self):
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #16161C;
             }
-            #TopToolbar, #BottomPanel {
+            #TopToolbar, #BottomPanel, #RecordBar {
                 background-color: #1F1F28;
                 border: 1px solid #2B2B38;
                 border-radius: 8px;
+            }
+            #RecordBar {
+                background-color: #1A1A22;
+                border-color: #272734;
+            }
+            #BtnRecord {
+                background-color: #7A1414;
+                color: #FFFFFF;
+                font-weight: bold;
+                border-color: #9B1C1C;
+            }
+            #BtnRecord:hover {
+                background-color: #9B1C1C;
+                border-color: #BD2424;
+            }
+            #BtnPauseRec {
+                background-color: #5A4710;
+                color: #FFECA8;
+                border-color: #7A5F14;
+            }
+            #BtnPauseRec:hover {
+                background-color: #7A5F14;
+            }
+            #BtnStopRec {
+                background-color: #2C2C3A;
+                color: #D6D6E6;
+            }
+            #BtnStopRec:hover {
+                background-color: #3C3C4E;
+            }
+            #BtnExportRec {
+                background-color: #1B5935;
+                color: #FFFFFF;
+                font-weight: bold;
+                border-color: #267A49;
+            }
+            #BtnExportRec:hover {
+                background-color: #267A49;
+            }
+            #RecStatus {
+                font-family: Consolas, monospace;
+                font-size: 12px;
+                font-weight: 500;
+                padding: 3px 8px;
+                border-radius: 4px;
+                background-color: #14141A;
+                border: 1px solid #262632;
             }
             QLabel {
                 color: #D2D2E0;

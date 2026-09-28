@@ -22,7 +22,10 @@ from PyQt5.QtWidgets import QApplication
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
-from player import VideoPlayerWindow, VideoCanvas, Stroke, dist_to_segment_sq
+from player import (
+    VideoPlayerWindow, VideoCanvas, Stroke, dist_to_segment_sq,
+    ActionRecorder, ExportVideoWorker
+)
 
 
 class TestEnhancedVideoPlayer(unittest.TestCase):
@@ -341,6 +344,112 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
 
         self.assertFalse(self.player.is_playing)
         print("[OK] Спам шагами на 0.05x скорости отрабатывает без зависаний и задержек")
+
+    def test_16_action_recorder_lifecycle(self):
+        """Проверка жизненного цикла записи действий: старт, рисование, пауза, кадры, отмена, экспорт JSON"""
+        rec = self.player.recorder
+        self.assertEqual(rec.state, ActionRecorder.STATE_IDLE)
+
+        self.player.start_actions_record()
+        self.assertTrue(rec.is_recording())
+        self.assertFalse(self.player.btn_rec_start.isEnabled())
+        self.assertTrue(self.player.btn_rec_pause.isEnabled())
+        self.assertTrue(self.player.btn_rec_stop.isEnabled())
+
+        canvas = self.player.canvas
+        ev_press = QMouseEvent(QMouseEvent.MouseButtonPress, QPoint(50, 50), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+        canvas.mousePressEvent(ev_press)
+        ev_move = QMouseEvent(QMouseEvent.MouseMove, QPoint(60, 70), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+        canvas.mouseMoveEvent(ev_move)
+        ev_release = QMouseEvent(QMouseEvent.MouseButtonRelease, QPoint(60, 70), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+        canvas.mouseReleaseEvent(ev_release)
+
+        types = [e['type'] for e in rec.events]
+        self.assertIn('stroke_start', types)
+        self.assertIn('stroke_point', types)
+        self.assertIn('stroke_end', types)
+
+        self.player.step_frame(1)
+        frame_events = [e for e in rec.events if e['type'] == 'frame']
+        self.assertGreaterEqual(len(frame_events), 2)
+        self.assertEqual(frame_events[-1]['frame_idx'], 1)
+
+        self.player.pause_actions_record()
+        self.assertTrue(rec.is_paused())
+        self.assertIn("Resume", self.player.btn_rec_pause.text())
+
+        self.player.pause_actions_record()
+        self.assertTrue(rec.is_recording())
+
+        self.player.canvas.undo_last_action()
+        self.assertEqual(rec.events[-1]['type'], 'undo')
+
+        rec.stop()
+        self.assertFalse(rec.is_active())
+        self.assertGreater(rec.elapsed_time, 0.0)
+
+        json_path = os.path.abspath("test_actions.json")
+        try:
+            rec.save_json(json_path)
+            self.assertTrue(os.path.exists(json_path))
+
+            new_rec = ActionRecorder(self.player)
+            new_rec.load_json(json_path)
+            self.assertEqual(len(new_rec.events), len(rec.events))
+            self.assertAlmostEqual(new_rec.elapsed_time, rec.elapsed_time, places=2)
+        finally:
+            if os.path.exists(json_path):
+                os.remove(json_path)
+
+        print("[OK] Запись действий (старт, штрихи, пауза, таймкоды, JSON) работает штатно")
+
+    def test_17_export_video_worker(self):
+        """Проверка экспорта отредактированного видео в отдельный MP4 файл"""
+        import cv2
+        out_mp4 = os.path.abspath("test_rendered_export.mp4")
+        if os.path.exists(out_mp4):
+            os.remove(out_mp4)
+
+        events = [
+            {'type': 'frame', 'time': 0.0, 'frame_idx': 0, 'zoom': 1.0, 'pan': (0, 0)},
+            {'type': 'stroke_start', 'time': 0.05, 'stroke_id': 1, 'color': '#FF3B30', 'width': 6.0, 'pt': (50.0, 50.0)},
+            {'type': 'stroke_point', 'time': 0.10, 'stroke_id': 1, 'pt': (100.0, 100.0)},
+            {'type': 'stroke_point', 'time': 0.15, 'stroke_id': 1, 'pt': (150.0, 80.0)},
+            {'type': 'stroke_end', 'time': 0.20, 'stroke_id': 1},
+            {'type': 'frame', 'time': 0.25, 'frame_idx': 1, 'zoom': 1.0, 'pan': (0, 0)},
+            {'type': 'frame', 'time': 0.35, 'frame_idx': 2, 'zoom': 1.0, 'pan': (0, 0)},
+            {'type': 'undo', 'time': 0.40},
+            {'type': 'stop', 'time': 0.50}
+        ]
+
+        worker = ExportVideoWorker(
+            video_path=self.video_path,
+            events=events,
+            total_duration=0.50,
+            output_path=out_mp4,
+            fps=30.0
+        )
+
+        worker.run()
+
+        self.assertTrue(os.path.exists(out_mp4), "Экспортированный видеофайл должен быть создан")
+        self.assertGreater(os.path.getsize(out_mp4), 1000, "Размер видеофайла должен быть больше 1 КБ")
+
+        cap_out = cv2.VideoCapture(out_mp4)
+        self.assertTrue(cap_out.isOpened(), "Экспортированное видео должно открываться")
+        out_frames = int(cap_out.get(cv2.CAP_PROP_FRAME_COUNT))
+        out_w = int(cap_out.get(cv2.CAP_PROP_FRAME_WIDTH))
+        out_h = int(cap_out.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap_out.release()
+
+        self.assertGreaterEqual(out_frames, 10, "Должно быть отрендерено не менее 10 кадров")
+        self.assertGreater(out_w, 0)
+        self.assertGreater(out_h, 0)
+
+        if os.path.exists(out_mp4):
+            os.remove(out_mp4)
+
+        print(f"[OK] Экспорт видео MP4 ({out_w}x{out_h}, {out_frames} кадров) выполнен успешно")
 
 
 if __name__ == "__main__":
