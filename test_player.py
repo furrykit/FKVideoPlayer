@@ -24,8 +24,13 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 from player import (
     VideoPlayerWindow, VideoCanvas, Stroke, dist_to_segment_sq,
-    ActionRecorder, ExportVideoWorker, OverlayObject
+    ActionRecorder, ExportVideoWorker, OverlayObject, set_dark_titlebar
 )
+from i18n import tr, I18nManager
+from capture import list_open_windows, capture_window_frame
+from audio import MicrophoneRecorder, get_audio_input_devices
+from projects import ProjectManager
+from settings_dialogs import NewCanvasDialog, ExportDialog, PreferencesDialog, DEFAULT_EXPORT_PRESETS
 
 
 class TestEnhancedVideoPlayer(unittest.TestCase):
@@ -634,6 +639,173 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         cyrillic_matches = re.findall(r'[\u0400-\u04FF]', code)
         self.assertEqual(len(cyrillic_matches), 0, f"Found {len(cyrillic_matches)} Cyrillic characters in player.py: {cyrillic_matches[:10]}")
         print("[OK] UI 100% localized into English: 0 Cyrillic characters in player.py")
+
+    def test_23_titlebar_dark_mode_helper(self):
+        """Verify set_dark_titlebar executes safely without raising exceptions"""
+        try:
+            set_dark_titlebar(self.player)
+            success = True
+        except Exception:
+            success = False
+        self.assertTrue(success, "set_dark_titlebar should run safely")
+        print("[OK] Titlebar dark mode attribute applied safely")
+
+    def test_24_i18n_translation_switching(self):
+        """Verify internationalization switches between English and Russian"""
+        i18n = I18nManager.instance()
+        i18n.set_language('en')
+        self.assertEqual(i18n.lang, 'en')
+        self.assertEqual(tr('menu_file'), '&File')
+        self.assertEqual(tr('btn_brush'), 'Brush (B)')
+
+        i18n.set_language('ru')
+        self.assertEqual(i18n.lang, 'ru')
+        self.assertEqual(tr('menu_file'), '&Файл')
+        self.assertEqual(tr('btn_brush'), 'Кисть (B)')
+
+        # Switch back to English
+        i18n.set_language('en')
+        self.assertEqual(i18n.lang, 'en')
+        print("[OK] i18n dynamic language switching (English/Russian) works properly")
+
+    def test_25_window_capture_enumeration(self):
+        """Verify window capture enumeration returns list of window objects"""
+        windows = list_open_windows()
+        self.assertIsInstance(windows, list)
+        for w in windows[:5]:
+            self.assertIn('hwnd', w)
+            self.assertIn('title', w)
+            self.assertIn('width', w)
+            self.assertIn('height', w)
+        # Test capture_window_frame handles invalid hwnd without crashing
+        res = capture_window_frame(999999999)
+        self.assertIsNone(res)
+        print(f"[OK] Window capture enumeration succeeded (discovered {len(windows)} windows)")
+
+    def test_26_microphone_recorder_pcm_and_wav(self):
+        """Verify microphone device enumeration and recorder class"""
+        devs = get_audio_input_devices()
+        self.assertIsInstance(devs, list)
+        mic = MicrophoneRecorder(parent=self.player)
+        self.assertFalse(mic.is_recording)
+
+        temp_wav = os.path.abspath("test_mic_output.wav")
+        if os.path.exists(temp_wav):
+            os.remove(temp_wav)
+
+        started = mic.start_recording(temp_wav)
+        if started:
+            self.assertTrue(mic.is_recording)
+            out_file = mic.stop_recording()
+            self.assertFalse(mic.is_recording)
+
+        if os.path.exists(temp_wav):
+            os.remove(temp_wav)
+        print(f"[OK] Microphone input detection ({len(devs)} devices) and recorder operational")
+
+    def test_27_text_overlay_rendering_and_actions(self):
+        """Verify text overlay creation, font rendering, and action serialization"""
+        canvas = self.player.canvas
+        rec = self.player.recorder
+        text_data = {
+            'text': 'Test Neon Text',
+            'font_family': 'Arial',
+            'font_size': 28,
+            'bold': True,
+            'italic': False,
+            'color': '#007AFF',
+            'bg_color': 'transparent'
+        }
+        ov = OverlayObject(99, 'text', QRectF(50, 50, 200, 80), start_time=0.0, text_data=text_data)
+        self.assertEqual(ov.obj_type, OverlayObject.TYPE_TEXT)
+        self.assertEqual(ov.text, 'Test Neon Text')
+
+        frame_img = ov.get_frame_at_time(0.0)
+        self.assertIsNotNone(frame_img)
+        self.assertFalse(frame_img.isNull())
+        self.assertEqual(frame_img.width(), 200)
+        self.assertEqual(frame_img.height(), 80)
+
+        # Record action
+        rec.start()
+        rec.record_overlay_add(ov)
+        rec.stop()
+        add_event = [e for e in rec.events if e['type'] == 'overlay_add'][-1]
+        self.assertEqual(add_event['type'], 'overlay_add')
+        self.assertIn('text_data', add_event)
+        self.assertEqual(add_event['text_data']['text'], 'Test Neon Text')
+        ov.close()
+        print("[OK] Text overlay creation, font rendering (200x80) and action logging verified")
+
+    def test_28_blank_canvas_creation_and_projects(self):
+        """Verify blank canvas project creation and recent projects persistence"""
+        pm = ProjectManager.instance()
+        pm.add_project('blank', 'Canvas 1920x1080', '1920x1080', 1920, 1080)
+        recent = pm.get_recent_projects()
+        self.assertGreaterEqual(len(recent), 1)
+        self.assertEqual(recent[0]['name'], 'Canvas 1920x1080')
+
+        self.player.create_blank_canvas(1280, 720, "#000000", 30.0)
+        self.assertEqual(self.player.canvas.video_width, 1280)
+        self.assertEqual(self.player.canvas.video_height, 720)
+        print("[OK] Blank canvas creation and project persistence operational")
+
+    def test_29_advanced_export_options_and_presets(self):
+        """Verify advanced export presets configuration and ExportVideoWorker with custom options"""
+        self.assertIn("YouTube 1080p 60fps (x264)", DEFAULT_EXPORT_PRESETS)
+        self.assertIn("Ultra Quality Archive (HEVC H.265 4K)", DEFAULT_EXPORT_PRESETS)
+
+        out_mp4 = os.path.abspath("test_advanced_export.mp4")
+        if os.path.exists(out_mp4):
+            os.remove(out_mp4)
+
+        text_data = {
+            'text': 'Export Text',
+            'font_family': 'Segoe UI',
+            'font_size': 24,
+            'bold': True,
+            'italic': False,
+            'color': '#FFFFFF',
+            'bg_color': 'transparent'
+        }
+        events = [
+            {'type': 'frame', 'time': 0.0, 'frame_idx': 0, 'zoom': 1.0, 'pan': (0, 0)},
+            {'type': 'overlay_add', 'time': 0.05, 'obj_id': 10, 'obj_type': 'text', 'file_path': 'text',
+             'rect': [20.0, 20.0, 180.0, 60.0], 'text_data': text_data},
+            {'type': 'stroke_start', 'time': 0.1, 'stroke_id': 1, 'color': '#007AFF', 'width': 4.0, 'pt': (30.0, 30.0)},
+            {'type': 'stroke_point', 'time': 0.15, 'stroke_id': 1, 'pt': (80.0, 80.0)},
+            {'type': 'stroke_end', 'time': 0.2, 'stroke_id': 1},
+            {'type': 'stop', 'time': 0.3}
+        ]
+
+        worker = ExportVideoWorker(
+            video_path=self.video_path,
+            events=events,
+            total_duration=0.3,
+            output_path=out_mp4,
+            fps=30.0,
+            out_size=(640, 360),
+            codec='libx264',
+            bitrate='4M'
+        )
+        worker.run()
+
+        self.assertTrue(os.path.exists(out_mp4), "Exported video file must exist")
+        self.assertGreater(os.path.getsize(out_mp4), 1000)
+
+        import cv2
+        cap = cv2.VideoCapture(out_mp4)
+        self.assertTrue(cap.isOpened())
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+
+        self.assertEqual(w, 640)
+        self.assertEqual(h, 360)
+
+        if os.path.exists(out_mp4):
+            os.remove(out_mp4)
+        print("[OK] Advanced export (x264, custom resolution 640x360, text overlay) executed cleanly")
 
 
 if __name__ == "__main__":

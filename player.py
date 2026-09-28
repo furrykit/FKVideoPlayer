@@ -22,6 +22,38 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 
+from i18n import tr, I18nManager
+from capture import list_open_windows, WindowCaptureWorker
+from audio import MicrophoneRecorder, get_audio_input_devices
+from projects import ProjectManager
+from settings_dialogs import (
+    NewCanvasDialog, WindowCaptureDialog, TextOverlayDialog,
+    ExportDialog, PreferencesDialog, AboutDialog, UpdatesDialog,
+    DEFAULT_HOTKEYS, HOTKEYS_CONFIG_PATH
+)
+
+
+def set_dark_titlebar(window):
+    """Enable native dark titlebar and caption color on Windows 10/11"""
+    try:
+        import ctypes
+        from ctypes import c_int, byref, sizeof
+        hwnd = int(window.winId())
+        # DWMWA_USE_IMMERSIVE_DARK_MODE = 20 (Windows 10 19041+ / Windows 11)
+        val = c_int(1)
+        res = ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, byref(val), sizeof(val))
+        if res != 0:
+            # Older Windows 10 (1809 / 1903)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 19, byref(val), sizeof(val))
+        # DWMWA_CAPTION_COLOR = 35 (Windows 11 build 22000+) - Dark theme #121218 (BGR: 0x00181212)
+        dark_color = c_int(0x00181212)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 35, byref(dark_color), sizeof(dark_color))
+        # DWMWA_TEXT_COLOR = 36 (White titlebar text)
+        white_text = c_int(0x00FFFFFF)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 36, byref(white_text), sizeof(white_text))
+    except Exception:
+        pass
+
 
 def resource_path(relative_path):
     base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
@@ -121,14 +153,34 @@ class OverlayObject:
     TYPE_IMAGE = "image"
     TYPE_GIF = "gif"
     TYPE_VIDEO = "video"
+    TYPE_TEXT = "text"
     MAX_VIDEO_CACHE = 45
 
-    def __init__(self, obj_id: int, file_path: str, rect: QRectF, start_time: float = 0.0):
+    def __init__(self, obj_id: int, file_path: str, rect: QRectF, start_time: float = 0.0, text_data: dict = None):
         self.obj_id = obj_id
         self.file_path = file_path
         self.rect = QRectF(rect)
         self.start_time = float(start_time)
-        self.obj_type = self._detect_type(file_path)
+        self.text_data = text_data
+
+        if text_data or file_path == 'text':
+            self.obj_type = self.TYPE_TEXT
+            self.text = text_data.get('text', 'Sample Text') if text_data else 'Sample Text'
+            self.font_family = text_data.get('font_family', 'Segoe UI') if text_data else 'Segoe UI'
+            self.font_size = text_data.get('font_size', 36) if text_data else 36
+            self.font_bold = text_data.get('bold', True) if text_data else True
+            self.font_italic = text_data.get('italic', False) if text_data else False
+            self.text_color = text_data.get('color', '#FFFFFF') if text_data else '#FFFFFF'
+            self.bg_color = text_data.get('bg_color', 'transparent') if text_data else 'transparent'
+        else:
+            self.obj_type = self._detect_type(file_path)
+            self.text = ""
+            self.font_family = "Segoe UI"
+            self.font_size = 36
+            self.font_bold = False
+            self.font_italic = False
+            self.text_color = "#FFFFFF"
+            self.bg_color = "transparent"
 
         self.static_image = None
         self.gif_frames = []
@@ -142,7 +194,8 @@ class OverlayObject:
         self.video_last_idx = -1
         self.video_cache = collections.OrderedDict()
 
-        self._load_media()
+        if self.obj_type != self.TYPE_TEXT:
+            self._load_media()
 
     def _detect_type(self, path: str) -> str:
         ext = os.path.splitext(path)[1].lower()
@@ -195,7 +248,26 @@ class OverlayObject:
 
     def get_frame_at_time(self, elapsed_sec: float) -> QImage:
         rel_time = max(0.0, float(elapsed_sec) - self.start_time)
-        if self.obj_type == self.TYPE_IMAGE:
+        if self.obj_type == self.TYPE_TEXT:
+            w, h = max(10, int(self.rect.width())), max(10, int(self.rect.height()))
+            img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
+            img.fill(Qt.transparent)
+            p = QPainter(img)
+            p.setRenderHint(QPainter.Antialiasing, True)
+            p.setRenderHint(QPainter.TextAntialiasing, True)
+            if self.bg_color and self.bg_color != 'transparent':
+                p.setBrush(QColor(self.bg_color))
+                p.setPen(Qt.NoPen)
+                p.drawRoundedRect(0, 0, w, h, 6, 6)
+            font = QFont(self.font_family, self.font_size)
+            font.setBold(self.font_bold)
+            font.setItalic(self.font_italic)
+            p.setFont(font)
+            p.setPen(QColor(self.text_color))
+            p.drawText(0, 0, w, h, Qt.AlignCenter | Qt.TextWordWrap, self.text)
+            p.end()
+            return img
+        elif self.obj_type == self.TYPE_IMAGE:
             return self.static_image
         elif self.obj_type == self.TYPE_GIF:
             if not self.gif_frames:
@@ -260,6 +332,7 @@ class VideoCanvas(QWidget):
     TOOL_ERASER = 1
     TOOL_PAN = 2
     TOOL_SELECT = 3
+    TOOL_TEXT = 4
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -296,6 +369,25 @@ class VideoCanvas(QWidget):
         self._drag_start_rect = None
 
         self.update_cursor()
+
+    def set_bgr_frame(self, frame_bgr: np.ndarray):
+        if frame_bgr is None:
+            return
+        h, w, ch = frame_bgr.shape
+        self.video_width = w
+        self.video_height = h
+        qimg = QImage(frame_bgr.data, w, h, ch * w, QImage.Format_BGR888).copy()
+        self.current_qimage = qimg
+        self.update()
+
+    def set_blank_canvas(self, width: int, height: int, bg_hex: str = "#14141A"):
+        self.video_width = width
+        self.video_height = height
+        img = QImage(width, height, QImage.Format_RGB32)
+        img.fill(QColor(bg_hex))
+        self.current_qimage = img
+        self.fit_to_view()
+        self.update()
 
     def _create_brush_cursor(self) -> QCursor:
         d = max(5, int(round(self.pen_width)))
@@ -688,6 +780,32 @@ class VideoCanvas(QWidget):
             event.acceptProposedAction()
             self.update()
 
+    def mouseDoubleClickEvent(self, event):
+        if self.active_tool == self.TOOL_SELECT and self.selected_overlay:
+            if self.selected_overlay.obj_type == OverlayObject.TYPE_TEXT:
+                ov = self.selected_overlay
+                dlg = TextOverlayDialog(
+                    initial_text=ov.text,
+                    initial_font=QFont(ov.font_family, ov.font_size),
+                    initial_color=ov.text_color,
+                    initial_bg=ov.bg_color,
+                    parent=self
+                )
+                if dlg.exec_() == 1:
+                    d = dlg.get_data()
+                    ov.text = d['text']
+                    ov.font_family = d['font_family']
+                    ov.font_size = d['font_size']
+                    ov.font_bold = d['bold']
+                    ov.font_italic = d['italic']
+                    ov.text_color = d['color']
+                    ov.bg_color = d['bg_color']
+                    if self.recorder and self.recorder.is_active():
+                        self.recorder.record_overlay_transform(ov)
+                    self.update()
+                return
+        super().mouseDoubleClickEvent(event)
+
     def mousePressEvent(self, event):
         pos = QPointF(event.pos())
         self.last_mouse_pos = pos
@@ -706,6 +824,12 @@ class VideoCanvas(QWidget):
             if self.active_tool == self.TOOL_PAN:
                 self.is_panning = True
                 self.setCursor(Qt.ClosedHandCursor)
+            elif self.active_tool == self.TOOL_TEXT:
+                vpt = self.screen_to_video(pos)
+                player = self.window()
+                if hasattr(player, 'add_text_overlay'):
+                    player.add_text_overlay(pos=vpt)
+                return
             elif self.active_tool == self.TOOL_PEN:
                 vpt = self.screen_to_video(pos)
                 stroke_width_video = max(0.5, self.pen_width / max(0.01, self.zoom_factor))
@@ -1166,14 +1290,26 @@ class ActionRecorder:
     def record_overlay_add(self, overlay):
         if self.state != self.STATE_RECORDING:
             return
-        self.events.append({
+        entry = {
             'type': 'overlay_add',
             'time': self.current_time(),
             'obj_id': overlay.obj_id,
+            'obj_type': overlay.obj_type,
             'file_path': overlay.file_path,
             'rect': [round(overlay.rect.x(), 2), round(overlay.rect.y(), 2),
                      round(overlay.rect.width(), 2), round(overlay.rect.height(), 2)]
-        })
+        }
+        if overlay.obj_type == OverlayObject.TYPE_TEXT:
+            entry['text_data'] = {
+                'text': overlay.text,
+                'font_family': overlay.font_family,
+                'font_size': overlay.font_size,
+                'bold': overlay.font_bold,
+                'italic': overlay.font_italic,
+                'color': overlay.text_color,
+                'bg_color': overlay.bg_color
+            }
+        self.events.append(entry)
 
     def record_overlay_transform(self, overlay):
         if self.state != self.STATE_RECORDING:
@@ -1222,14 +1358,18 @@ class ExportVideoWorker(QThread):
     progress = pyqtSignal(int, int, str)
     finished = pyqtSignal(bool, str)
 
-    def __init__(self, video_path, events, total_duration, output_path, fps=30.0, out_size=None):
+    def __init__(self, video_path, events, total_duration, output_path, fps=30.0, out_size=None,
+                 codec='libx264', bitrate='10M', audio_path=None):
         super().__init__()
         self.video_path = video_path
         self.events = events
         self.total_duration = total_duration
         self.output_path = output_path
-        self.fps = max(10.0, min(60.0, fps))
+        self.fps = max(10.0, min(120.0, fps))
         self.out_size = out_size
+        self.codec = codec or 'libx264'
+        self.bitrate = bitrate or '10M'
+        self.audio_path = audio_path
         self._is_cancelled = False
 
     def cancel(self):
@@ -1253,21 +1393,45 @@ class ExportVideoWorker(QThread):
         if src_w <= 0 or src_h <= 0:
             src_w, src_h = 1280, 720
 
-        out_w = (src_w // 2) * 2
-        out_h = (src_h // 2) * 2
+        if self.out_size and len(self.out_size) == 2 and self.out_size[0] > 0 and self.out_size[1] > 0:
+            out_w, out_h = self.out_size
+        else:
+            out_w, out_h = src_w, src_h
+
+        out_w = (out_w // 2) * 2
+        out_h = (out_h // 2) * 2
 
         use_pyav = True
         container = None
         stream = None
         cv_writer = None
 
+        codec_name = self.codec.lower()
+        if codec_name in ('x264', 'libx264', 'h264'):
+            pyav_codec = 'h264'
+        elif codec_name in ('hevc', 'x265', 'libx265', 'h265'):
+            pyav_codec = 'hevc'
+        elif codec_name in ('vp9', 'libvpx-vp9'):
+            pyav_codec = 'vp9'
+        elif codec_name in ('prores', 'prores_ks'):
+            pyav_codec = 'prores'
+        else:
+            pyav_codec = 'h264'
+
         try:
             container = av.open(self.output_path, mode='w')
-            stream = container.add_stream('h264', rate=int(round(self.fps)))
+            stream = container.add_stream(pyav_codec, rate=int(round(self.fps)))
             stream.width = out_w
             stream.height = out_h
             stream.pix_fmt = 'yuv420p'
-            stream.options = {'crf': '20', 'preset': 'veryfast'}
+            if pyav_codec in ('h264', 'hevc'):
+                stream.options = {'crf': '20', 'preset': 'veryfast'}
+            elif self.bitrate:
+                try:
+                    b_val = int(str(self.bitrate).upper().replace('M', '000000').replace('K', '000'))
+                    stream.bit_rate = b_val
+                except Exception:
+                    pass
         except Exception:
             use_pyav = False
             if container:
@@ -1336,7 +1500,8 @@ class ExportVideoWorker(QThread):
                     oid = ev['obj_id']
                     fpath = ev.get('file_path', '')
                     r = QRectF(*ev['rect'])
-                    active_overlays[oid] = OverlayObject(oid, fpath, r, start_time=ev['time'])
+                    t_data = ev.get('text_data')
+                    active_overlays[oid] = OverlayObject(oid, fpath, r, start_time=ev['time'], text_data=t_data)
                 elif etype == 'overlay_transform':
                     oid = ev['obj_id']
                     if oid in active_overlays:
@@ -1428,6 +1593,29 @@ class ExportVideoWorker(QThread):
             if cv_writer:
                 cv_writer.release()
 
+        # Audio commentary muxing via ffmpeg
+        if not self._is_cancelled and self.audio_path and os.path.exists(self.audio_path) and os.path.getsize(self.audio_path) > 100:
+            import subprocess, shutil
+            ffmpeg_exe = shutil.which("ffmpeg") or r"C:\ffmpeg\ffmpeg.EXE"
+            if os.path.exists(ffmpeg_exe):
+                temp_mux = self.output_path + ".muxed" + os.path.splitext(self.output_path)[1]
+                cmd = [
+                    ffmpeg_exe, "-y",
+                    "-i", self.output_path,
+                    "-i", self.audio_path,
+                    "-c:v", "copy",
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                    "-shortest",
+                    temp_mux
+                ]
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if res.returncode == 0 and os.path.exists(temp_mux) and os.path.getsize(temp_mux) > 1000:
+                    try:
+                        os.replace(temp_mux, self.output_path)
+                    except Exception:
+                        pass
+
         if self._is_cancelled:
             if os.path.exists(self.output_path):
                 try:
@@ -1498,6 +1686,18 @@ class FKVideoPlayer(QMainWindow):
         self.overlay_anim_timer.timeout.connect(self._on_overlay_anim_tick)
         self.overlay_anim_timer.start(33)
 
+        self.mic_recorder = MicrophoneRecorder(parent=self)
+        self.is_mic_enabled = True
+        self.last_mic_wav = None
+        self.selected_mic_device = None
+
+        self.window_capture_worker = None
+        self.is_capturing_window = False
+        self.captured_window_hwnd = None
+        self.captured_window_title = ""
+        self.temp_capture_writer = None
+        self.temp_capture_video_path = None
+
         self._init_ui()
         self._apply_dark_theme()
         self._setup_shortcuts()
@@ -1505,7 +1705,14 @@ class FKVideoPlayer(QMainWindow):
         if initial_video_path and os.path.exists(initial_video_path):
             self.load_video(initial_video_path)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        set_dark_titlebar(self)
+
     def _init_ui(self):
+        self._create_menu_bar()
+        I18nManager.instance().add_listener(self.update_ui_texts)
+
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
@@ -1533,10 +1740,20 @@ class FKVideoPlayer(QMainWindow):
         layout.setContentsMargins(6, 3, 6, 3)
         layout.setSpacing(4)
 
+        self.btn_new_canvas = QPushButton("📄 New")
+        self.btn_new_canvas.setToolTip("Create blank canvas project (Ctrl+N)")
+        self.btn_new_canvas.clicked.connect(self.open_new_canvas_dialog)
+        layout.addWidget(self.btn_new_canvas)
+
         self.btn_open = QPushButton("📂 Open")
-        self.btn_open.setToolTip("Open video file (O)")
+        self.btn_open.setToolTip("Open video file (Ctrl+O)")
         self.btn_open.clicked.connect(self.open_file_dialog)
         layout.addWidget(self.btn_open)
+
+        self.btn_capture_win = QPushButton("🪟 Stream")
+        self.btn_capture_win.setToolTip("Capture live window or stream (Ctrl+W)")
+        self.btn_capture_win.clicked.connect(self.open_window_capture_dialog)
+        layout.addWidget(self.btn_capture_win)
 
         self._add_separator(layout)
 
@@ -1552,6 +1769,12 @@ class FKVideoPlayer(QMainWindow):
         self.btn_tool_eraser.setCheckable(True)
         self.btn_tool_eraser.clicked.connect(lambda: self._select_tool(VideoCanvas.TOOL_ERASER))
         layout.addWidget(self.btn_tool_eraser)
+
+        self.btn_tool_text = QPushButton("🔤 Text")
+        self.btn_tool_text.setToolTip("Add text overlay (T)")
+        self.btn_tool_text.setCheckable(True)
+        self.btn_tool_text.clicked.connect(lambda: self._select_tool(VideoCanvas.TOOL_TEXT))
+        layout.addWidget(self.btn_tool_text)
 
         self.btn_tool_pan = QPushButton("✋ Pan")
         self.btn_tool_pan.setToolTip("Pan video canvas (H)")
@@ -1681,6 +1904,12 @@ class FKVideoPlayer(QMainWindow):
         self.btn_rec_stop.setEnabled(False)
         self.btn_rec_stop.clicked.connect(self.stop_actions_record)
         layout.addWidget(self.btn_rec_stop)
+
+        self.btn_mic_toggle = QPushButton("🎤 Mic: ON")
+        self.btn_mic_toggle.setObjectName("BtnMicToggle")
+        self.btn_mic_toggle.setToolTip("Toggle microphone commentary recording")
+        self.btn_mic_toggle.clicked.connect(self._toggle_microphone)
+        layout.addWidget(self.btn_mic_toggle)
 
         self._add_separator(layout)
 
@@ -1817,62 +2046,87 @@ class FKVideoPlayer(QMainWindow):
         return panel
 
     def _setup_shortcuts(self):
-        QShortcut(QKeySequence(Qt.Key_Space), self, self.toggle_play_pause)
-        QShortcut(QKeySequence("K"), self, self.toggle_play_pause)
+        if hasattr(self, '_active_shortcuts'):
+            for sc in self._active_shortcuts:
+                sc.setEnabled(False)
+        self._active_shortcuts = []
 
-        QShortcut(QKeySequence(Qt.Key_Left), self, lambda: self.step_frame(-1))
-        QShortcut(QKeySequence(Qt.Key_Right), self, lambda: self.step_frame(1))
+        cfg_hotkeys = dict(DEFAULT_HOTKEYS)
+        try:
+            if os.path.exists(HOTKEYS_CONFIG_PATH):
+                with open(HOTKEYS_CONFIG_PATH, 'r', encoding='utf-8') as f:
+                    cfg_hotkeys.update(json.load(f))
+        except Exception:
+            pass
 
-        QShortcut(QKeySequence("Shift+Left"), self, lambda: self.seek_seconds(-1.0))
-        QShortcut(QKeySequence("Shift+Right"), self, lambda: self.seek_seconds(1.0))
+        def reg_sc(key_seq, callback):
+            if key_seq:
+                try:
+                    sc = QShortcut(QKeySequence(key_seq), self, callback)
+                    self._active_shortcuts.append(sc)
+                except Exception:
+                    pass
 
-        QShortcut(QKeySequence("Ctrl+Left"), self, lambda: self.seek_seconds(-5.0))
-        QShortcut(QKeySequence("Ctrl+Right"), self, lambda: self.seek_seconds(5.0))
-        QShortcut(QKeySequence("J"), self, lambda: self.seek_seconds(-5.0))
-        QShortcut(QKeySequence("L"), self, lambda: self.seek_seconds(5.0))
+        reg_sc(cfg_hotkeys.get("play_pause", "Space"), self.toggle_play_pause)
+        reg_sc("K", self.toggle_play_pause)
+        reg_sc(cfg_hotkeys.get("step_prev", "Left"), lambda: self.step_frame(-1))
+        reg_sc(cfg_hotkeys.get("step_next", "Right"), lambda: self.step_frame(1))
+        reg_sc(cfg_hotkeys.get("skip_back_1s", "J"), lambda: self.seek_seconds(-1.0))
+        reg_sc(cfg_hotkeys.get("skip_fwd_1s", "L"), lambda: self.seek_seconds(1.0))
 
-        QShortcut(QKeySequence(Qt.Key_Home), self, lambda: self._seek_to_frame(0))
-        QShortcut(QKeySequence(Qt.Key_End), self, lambda: self._seek_to_frame(self.total_frames - 1))
+        reg_sc("Shift+Left", lambda: self.seek_seconds(-1.0))
+        reg_sc("Shift+Right", lambda: self.seek_seconds(1.0))
+        reg_sc("Ctrl+Left", lambda: self.seek_seconds(-5.0))
+        reg_sc("Ctrl+Right", lambda: self.seek_seconds(5.0))
 
-        QShortcut(QKeySequence("M"), self, self.toggle_mute)
-        QShortcut(QKeySequence(Qt.Key_Up), self, lambda: self.adjust_volume(5))
-        QShortcut(QKeySequence(Qt.Key_Down), self, lambda: self.adjust_volume(-5))
+        reg_sc(Qt.Key_Home, lambda: self._seek_to_frame(0))
+        reg_sc(Qt.Key_End, lambda: self._seek_to_frame(self.total_frames - 1))
 
-        QShortcut(QKeySequence("Ctrl+Z"), self, self.canvas.undo_last_action)
-        QShortcut(QKeySequence(Qt.Key_Delete), self, self._on_delete_shortcut)
-        QShortcut(QKeySequence(Qt.Key_Backspace), self, self._on_delete_shortcut)
-        QShortcut(QKeySequence("Ctrl+D"), self, self._on_duplicate_shortcut)
-        QShortcut(QKeySequence("C"), self, self.canvas.clear_all_drawings)
+        reg_sc("M", self.toggle_mute)
+        reg_sc(Qt.Key_Up, lambda: self.adjust_volume(5))
+        reg_sc(Qt.Key_Down, lambda: self.adjust_volume(-5))
 
-        QShortcut(QKeySequence("["), self, lambda: self.spin_width.setValue(self.spin_width.value() - 1))
-        QShortcut(QKeySequence("]"), self, lambda: self.spin_width.setValue(self.spin_width.value() + 1))
+        reg_sc(cfg_hotkeys.get("undo", "Ctrl+Z"), self.canvas.undo_last_action)
+        reg_sc(cfg_hotkeys.get("delete_overlay", "Delete"), self._on_delete_shortcut)
+        reg_sc(Qt.Key_Backspace, self._on_delete_shortcut)
+        reg_sc(cfg_hotkeys.get("duplicate_overlay", "Ctrl+D"), self._on_duplicate_shortcut)
+        reg_sc("C", self.canvas.clear_all_drawings)
 
-        QShortcut(QKeySequence("<"), self, self.decrease_speed)
-        QShortcut(QKeySequence(">"), self, self.increase_speed)
-        QShortcut(QKeySequence("Shift+,"), self, self.decrease_speed)
-        QShortcut(QKeySequence("Shift+."), self, self.increase_speed)
-        QShortcut(QKeySequence("R"), self, self.reset_speed)
+        reg_sc("[", lambda: self.spin_width.setValue(self.spin_width.value() - 1))
+        reg_sc("]", lambda: self.spin_width.setValue(self.spin_width.value() + 1))
 
-        QShortcut(QKeySequence("+"), self, self.canvas.zoom_in)
-        QShortcut(QKeySequence("="), self, self.canvas.zoom_in)
-        QShortcut(QKeySequence("-"), self, self.canvas.zoom_out)
-        QShortcut(QKeySequence("0"), self, self.canvas.fit_to_view)
+        reg_sc("<", self.decrease_speed)
+        reg_sc(">", self.increase_speed)
+        reg_sc("Shift+,", self.decrease_speed)
+        reg_sc("Shift+.", self.increase_speed)
+        reg_sc("R", self.reset_speed)
 
-        QShortcut(QKeySequence("P"), self, lambda: self._select_tool(VideoCanvas.TOOL_PEN))
-        QShortcut(QKeySequence("E"), self, lambda: self._select_tool(VideoCanvas.TOOL_ERASER))
-        QShortcut(QKeySequence("H"), self, lambda: self._select_tool(VideoCanvas.TOOL_PAN))
-        QShortcut(QKeySequence("V"), self, lambda: self._select_tool(VideoCanvas.TOOL_SELECT))
-        QShortcut(QKeySequence("O"), self, self.open_file_dialog)
-        QShortcut(QKeySequence("Ctrl+I"), self, self.add_overlay_dialog)
+        reg_sc("+", self.canvas.zoom_in)
+        reg_sc("=", self.canvas.zoom_in)
+        reg_sc("-", self.canvas.zoom_out)
+        reg_sc("0", self.canvas.fit_to_view)
 
-        QShortcut(QKeySequence("Ctrl+R"), self, self._shortcut_toggle_record)
-        QShortcut(QKeySequence("Ctrl+Shift+P"), self, self.pause_actions_record)
-        QShortcut(QKeySequence("Ctrl+E"), self, self.export_recorded_video)
+        reg_sc(cfg_hotkeys.get("tool_brush", "P"), lambda: self._select_tool(VideoCanvas.TOOL_PEN))
+        reg_sc("B", lambda: self._select_tool(VideoCanvas.TOOL_PEN))
+        reg_sc(cfg_hotkeys.get("tool_eraser", "E"), lambda: self._select_tool(VideoCanvas.TOOL_ERASER))
+        reg_sc("H", lambda: self._select_tool(VideoCanvas.TOOL_PAN))
+        reg_sc(cfg_hotkeys.get("tool_select", "V"), lambda: self._select_tool(VideoCanvas.TOOL_SELECT))
+        reg_sc(cfg_hotkeys.get("tool_text", "T"), lambda: self._select_tool(VideoCanvas.TOOL_TEXT))
 
-        QShortcut(QKeySequence("PageUp"), self, lambda: self.bring_overlay_forward(self.canvas.selected_overlay))
-        QShortcut(QKeySequence("PageDown"), self, lambda: self.send_overlay_backward(self.canvas.selected_overlay))
-        QShortcut(QKeySequence("Shift+PageUp"), self, lambda: self.bring_overlay_to_front(self.canvas.selected_overlay))
-        QShortcut(QKeySequence("Shift+PageDown"), self, lambda: self.send_overlay_to_back(self.canvas.selected_overlay))
+        reg_sc(cfg_hotkeys.get("open_video", "Ctrl+O"), self.open_file_dialog)
+        reg_sc("O", self.open_file_dialog)
+        reg_sc(cfg_hotkeys.get("new_canvas", "Ctrl+N"), self.open_new_canvas_dialog)
+        reg_sc(cfg_hotkeys.get("capture_window", "Ctrl+W"), self.open_window_capture_dialog)
+        reg_sc("Ctrl+I", self.add_overlay_dialog)
+
+        reg_sc(cfg_hotkeys.get("record_toggle", "Ctrl+R"), self._shortcut_toggle_record)
+        reg_sc("Ctrl+Shift+P", self.pause_actions_record)
+        reg_sc(cfg_hotkeys.get("export_video", "Ctrl+E"), self.export_recorded_video)
+
+        reg_sc("PageUp", lambda: self.bring_overlay_forward(self.canvas.selected_overlay))
+        reg_sc("PageDown", lambda: self.send_overlay_backward(self.canvas.selected_overlay))
+        reg_sc("Shift+PageUp", lambda: self.bring_overlay_to_front(self.canvas.selected_overlay))
+        reg_sc("Shift+PageDown", lambda: self.send_overlay_to_back(self.canvas.selected_overlay))
 
     def delete_selected_overlay(self):
         if self.canvas.selected_overlay:
@@ -2163,6 +2417,13 @@ class FKVideoPlayer(QMainWindow):
 
         self._seek_to_frame(0)
         self.setWindowTitle(f"FKVideoPlayer — {os.path.basename(file_path)}")
+        self._stop_window_capture()
+        if self.cap:
+            ProjectManager.instance().add_project(
+                'video', os.path.basename(file_path), file_path,
+                int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            )
+            self._refresh_recent_projects_menu()
 
     def _cleanup_temp_audio(self):
         if getattr(self, 'temp_audio_path', None) and os.path.exists(self.temp_audio_path):
@@ -2441,6 +2702,15 @@ class FKVideoPlayer(QMainWindow):
         secs = sec % 60
         return f"{mins:02d}:{secs:04.1f}"
 
+    def _toggle_microphone(self):
+        self.is_mic_enabled = not self.is_mic_enabled
+        if self.is_mic_enabled:
+            self.btn_mic_toggle.setText("🎤 Mic: ON")
+            self.btn_mic_toggle.setStyleSheet("background-color: #1A3824; color: #34C759; border: 1px solid #34C759;")
+        else:
+            self.btn_mic_toggle.setText("🎤 Mic: OFF")
+            self.btn_mic_toggle.setStyleSheet("background-color: #381A1A; color: #FF3B30; border: 1px solid #FF3B30;")
+
     def start_actions_record(self):
         if self.recorder.is_active():
             return
@@ -2454,6 +2724,19 @@ class FKVideoPlayer(QMainWindow):
             )
             if reply != QMessageBox.Yes:
                 return
+
+        # Start microphone recording if enabled
+        if self.is_mic_enabled:
+            self.temp_mic_wav_path = os.path.abspath(f"temp_mic_{int(time.time())}.wav")
+            self.mic_recorder.start_recording(self.temp_mic_wav_path, self.selected_mic_device)
+
+        # Window capture frame recording
+        if self.is_capturing_window:
+            self.temp_capture_video_path = os.path.abspath(f"temp_capture_{int(time.time())}.mp4")
+            w, h = max(10, self.canvas.video_width), max(10, self.canvas.video_height)
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            self.temp_capture_writer = cv2.VideoWriter(self.temp_capture_video_path, fourcc, 30.0, (w, h))
+            self.video_path = self.temp_capture_video_path
 
         self.recorder.start()
         self.btn_rec_start.setEnabled(False)
@@ -2485,6 +2768,15 @@ class FKVideoPlayer(QMainWindow):
             return
         self.recorder.stop()
         self.rec_update_timer.stop()
+
+        # Stop microphone
+        if self.is_mic_enabled and self.mic_recorder.is_recording:
+            self.last_mic_wav = self.mic_recorder.stop_recording()
+
+        # Stop capture writer
+        if self.temp_capture_writer is not None:
+            self.temp_capture_writer.release()
+            self.temp_capture_writer = None
 
         self.btn_rec_start.setEnabled(True)
         self.btn_rec_pause.setEnabled(False)
@@ -2531,36 +2823,38 @@ class FKVideoPlayer(QMainWindow):
             QMessageBox.information(self, "Export Video", "No recorded actions to export.")
             return
 
-        base_name = "action_export.mp4"
-        dir_name = ""
-        v_path = self.video_path or getattr(self.recorder.player, 'video_path', '')
-        if v_path:
-            v_name = os.path.splitext(os.path.basename(v_path))[0]
-            base_name = f"{v_name}_edited.mp4"
-            dir_name = os.path.dirname(v_path)
+        out_w = self.canvas.video_width if self.canvas.video_width > 0 else 1920
+        out_h = self.canvas.video_height if self.canvas.video_height > 0 else 1080
+        has_mic = bool(self.last_mic_wav and os.path.exists(self.last_mic_wav))
 
-        save_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Edited Video",
-            os.path.join(dir_name, base_name),
-            "MP4 Video (*.mp4);;All Files (*.*)"
-        )
+        dlg = ExportDialog(default_w=out_w, default_h=out_h, has_audio=has_mic, parent=self)
+        if dlg.exec_() != 1:
+            return
+
+        cfg = dlg.get_export_config()
+        save_path = cfg['output_path']
         if not save_path:
             return
 
-        export_fps = min(60.0, max(24.0, self.fps))
         progress_dialog = QProgressDialog("Preparing video export...", "Cancel", 0, 100, self)
         progress_dialog.setWindowTitle("Export Video")
         progress_dialog.setWindowModality(Qt.WindowModal)
         progress_dialog.setMinimumDuration(0)
         progress_dialog.setValue(0)
 
+        v_path = self.video_path or getattr(self.recorder.player, 'video_path', '')
+        audio_target = self.last_mic_wav if cfg['include_audio'] else None
+
         self.export_worker = ExportVideoWorker(
             video_path=v_path,
             events=list(self.recorder.events),
             total_duration=self.recorder.elapsed_time,
             output_path=save_path,
-            fps=export_fps
+            fps=cfg['fps'],
+            out_size=(cfg['width'], cfg['height']),
+            codec=cfg['codec'],
+            bitrate=cfg['bitrate'],
+            audio_path=audio_target
         )
 
         def on_progress(cur, total, msg):
@@ -2579,6 +2873,259 @@ class FKVideoPlayer(QMainWindow):
         self.export_worker.progress.connect(on_progress)
         self.export_worker.finished.connect(on_finished)
         self.export_worker.start()
+
+    def add_text_overlay(self, text_data: dict = None, pos: QPointF = None):
+        if not text_data:
+            dlg = TextOverlayDialog(parent=self)
+            if dlg.exec_() != 1:
+                return
+            text_data = dlg.get_data()
+
+        vw = self.canvas.video_width if self.canvas.video_width > 0 else 1920
+        vh = self.canvas.video_height if self.canvas.video_height > 0 else 1080
+        tw = max(180.0, vw * 0.35)
+        th = max(60.0, vh * 0.12)
+
+        if pos is None:
+            tx = (vw - tw) * 0.5
+            ty = (vh - th) * 0.5
+        else:
+            tx = max(0.0, min(pos.x(), vw - tw))
+            ty = max(0.0, min(pos.y(), vh - th))
+
+        rect = QRectF(tx, ty, tw, th)
+        sid = self.recorder.allocate_stroke_id()
+        cur_t = self.recorder.current_time() if self.recorder.is_active() else 0.0
+        ov = OverlayObject(sid, 'text', rect, start_time=cur_t, text_data=text_data)
+        self.canvas.overlays.append(ov)
+        self.canvas.selected_overlay = ov
+        self.canvas.active_tool = VideoCanvas.TOOL_SELECT
+        self._select_tool(VideoCanvas.TOOL_SELECT)
+        if self.recorder.is_active():
+            self.recorder.record_overlay_add(ov)
+        self.canvas.update()
+
+    def open_new_canvas_dialog(self):
+        dlg = NewCanvasDialog(parent=self)
+        if dlg.exec_() == 1:
+            w, h, bg_hex, fps = dlg.get_settings()
+            self.create_blank_canvas(w, h, bg_hex, fps)
+
+    def create_blank_canvas(self, width=1920, height=1080, bg_hex="#14141A", fps=30.0):
+        self._stop_window_capture()
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+        self.video_path = ""
+        self.fps = fps
+        self.total_frames = int(fps * 3600) # 1 hour virtual timeline
+        self.current_frame_idx = 0
+        self.canvas.set_blank_canvas(width, height, bg_hex)
+        self.timeline_slider.setRange(0, self.total_frames - 1)
+        self.timeline_slider.setValue(0)
+        self.setWindowTitle(f"FKVideoPlayer — Canvas {width}x{height}")
+        if hasattr(self, 'lbl_time_info'):
+            self.lbl_time_info.setText(f"{width}x{height} | Blank Canvas | {fps:.0f} FPS")
+        ProjectManager.instance().add_project('blank', f'Canvas {width}x{height}', f'{width}x{height}', width, height)
+        self._refresh_recent_projects_menu()
+
+    def open_window_capture_dialog(self):
+        dlg = WindowCaptureDialog(parent=self)
+        if dlg.exec_() == 1 and dlg.selected_hwnd:
+            self.start_window_capture(dlg.selected_hwnd, dlg.selected_title)
+
+    def start_window_capture(self, hwnd: int, title: str):
+        self._stop_window_capture()
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+
+        self.is_capturing_window = True
+        self.captured_window_hwnd = hwnd
+        self.captured_window_title = title
+        self.setWindowTitle(f"FKVideoPlayer — Live Capture: {title}")
+        if hasattr(self, 'lbl_time_info'):
+            self.lbl_time_info.setText(f"Live Window: {title}")
+
+        self.window_capture_worker = WindowCaptureWorker(hwnd, target_fps=30.0, parent=self)
+        self.window_capture_worker.frame_captured.connect(self._on_captured_window_frame)
+        self.window_capture_worker.start()
+
+        ProjectManager.instance().add_project('window', f'Stream: {title}', str(hwnd))
+        self._refresh_recent_projects_menu()
+
+    def _stop_window_capture(self):
+        if self.window_capture_worker:
+            self.window_capture_worker.stop()
+            self.window_capture_worker = None
+        self.is_capturing_window = False
+
+    def _on_captured_window_frame(self, frame_bgr, timestamp):
+        if not self.is_capturing_window:
+            return
+        self.canvas.set_bgr_frame(frame_bgr)
+        if self.temp_capture_writer is not None:
+            self.temp_capture_writer.write(frame_bgr)
+
+    def open_preferences_dialog(self):
+        dlg = PreferencesDialog(parent=self)
+        dlg.hotkeys_updated.connect(self._setup_shortcuts)
+        dlg.language_changed.connect(lambda _: self.update_ui_texts())
+        dlg.exec_()
+
+    def open_video_properties_dialog(self):
+        QMessageBox.information(
+            self,
+            "Video & Canvas Properties",
+            f"Source: {self.video_path or 'Blank Canvas / Stream'}\n"
+            f"Resolution: {self.canvas.video_width}x{self.canvas.video_height}\n"
+            f"FPS: {self.fps:.2f}\n"
+            f"Total Frames: {self.total_frames}"
+        )
+
+    def open_export_presets_dialog(self):
+        dlg = ExportDialog(default_w=self.canvas.video_width, default_h=self.canvas.video_height, parent=self)
+        dlg.exec_()
+
+    def open_about_dialog(self):
+        dlg = AboutDialog(parent=self)
+        dlg.exec_()
+
+    def open_updates_dialog(self):
+        dlg = UpdatesDialog(parent=self)
+        dlg.exec_()
+
+    def open_donate(self):
+        from settings_dialogs import DONATE_URL
+        webbrowser.open(DONATE_URL)
+
+    def _create_menu_bar(self):
+        menubar = self.menuBar()
+        menubar.setStyleSheet("""
+            QMenuBar {
+                background-color: #14141C;
+                color: #C8C8DC;
+                border-bottom: 1px solid #282838;
+                padding: 2px 6px;
+                font-size: 12px;
+            }
+            QMenuBar::item {
+                background: transparent;
+                padding: 4px 10px;
+                border-radius: 4px;
+            }
+            QMenuBar::item:selected {
+                background-color: #242436;
+                color: #FFFFFF;
+            }
+            QMenu {
+                background-color: #1C1C28;
+                color: #E2E2EC;
+                border: 1px solid #323246;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 24px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #007AFF;
+                color: #FFFFFF;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #323246;
+                margin: 4px 6px;
+            }
+        """)
+
+        # File Menu
+        self.menu_file = menubar.addMenu(tr('menu_file'))
+        self.menu_file.addAction(tr('act_new_canvas'), self.open_new_canvas_dialog, QKeySequence("Ctrl+N"))
+        self.menu_file.addAction(tr('act_open_video'), self.open_file_dialog, QKeySequence("Ctrl+O"))
+        self.menu_file.addAction(tr('act_capture_window'), self.open_window_capture_dialog, QKeySequence("Ctrl+W"))
+
+        self.menu_recent = self.menu_file.addMenu(tr('act_recent_projects'))
+        self._refresh_recent_projects_menu()
+
+        self.menu_file.addSeparator()
+        self.menu_file.addAction(tr('act_save_actions'), self.save_actions_json, QKeySequence("Ctrl+S"))
+        self.menu_file.addAction(tr('act_load_actions'), self.load_actions_json)
+        self.menu_file.addSeparator()
+        self.menu_file.addAction(tr('act_exit'), self.close, QKeySequence("Ctrl+Q"))
+
+        # Settings Menu
+        self.menu_settings = menubar.addMenu(tr('menu_settings'))
+        self.menu_settings.addAction(tr('act_preferences'), self.open_preferences_dialog, QKeySequence("F2"))
+
+        # Video Settings Menu
+        self.menu_video_settings = menubar.addMenu(tr('menu_video_settings'))
+        self.menu_video_settings.addAction(tr('act_video_props'), self.open_video_properties_dialog)
+        self.menu_video_settings.addAction("Mute / Unmute Audio", self.toggle_mute, QKeySequence("M"))
+
+        # Export Menu
+        self.menu_export = menubar.addMenu(tr('menu_export'))
+        self.menu_export.addAction(tr('act_export_video'), self.export_recorded_video, QKeySequence("Ctrl+E"))
+        self.menu_export.addAction(tr('act_export_presets'), self.open_export_presets_dialog)
+
+        # Help Menu
+        self.menu_help = menubar.addMenu(tr('menu_help'))
+        self.menu_help.addAction(tr('act_about'), self.open_about_dialog, QKeySequence("F1"))
+        self.menu_help.addAction(tr('act_updates'), self.open_updates_dialog)
+        self.menu_help.addAction(tr('act_donate'), self.open_donate)
+
+    def _refresh_recent_projects_menu(self):
+        if not hasattr(self, 'menu_recent'):
+            return
+        self.menu_recent.clear()
+        projects = ProjectManager.instance().get_recent_projects()
+        if not projects:
+            act = self.menu_recent.addAction("No Recent Projects")
+            act.setEnabled(False)
+            return
+
+        for p in projects[:10]:
+            name = p.get('name', 'Project')
+            ptype = p.get('type', 'video')
+            icon_str = "🎬" if ptype == 'video' else ("🪟" if ptype == 'window' else "📄")
+            label = f"{icon_str} {name} ({p.get('date', '')})"
+            act = self.menu_recent.addAction(label)
+            act.triggered.connect(lambda _, pr=p: self._open_recent_project(pr))
+
+        self.menu_recent.addSeparator()
+        act_clear = self.menu_recent.addAction("Clear Recent Projects")
+        act_clear.triggered.connect(lambda: (ProjectManager.instance().clear(), self._refresh_recent_projects_menu()))
+
+    def _open_recent_project(self, p: dict):
+        ptype = p.get('type')
+        target = p.get('target')
+        if ptype == 'video' and os.path.exists(target):
+            self.load_video(target)
+        elif ptype == 'blank':
+            self.create_blank_canvas(p.get('width', 1920), p.get('height', 1080))
+        elif ptype == 'window':
+            try:
+                hwnd = int(target)
+                self.start_window_capture(hwnd, p.get('name', 'Window'))
+            except Exception:
+                self.open_window_capture_dialog()
+
+    def update_ui_texts(self):
+        """Update tooltips and labels when language changes"""
+        self.btn_tool_select.setToolTip(tr('btn_select'))
+        self.btn_tool_pen.setToolTip(tr('btn_brush'))
+        self.btn_tool_eraser.setToolTip(tr('btn_eraser'))
+        self.btn_tool_text.setToolTip(tr('btn_add_text'))
+        self.btn_add_overlay.setToolTip(tr('btn_add_overlay'))
+        self.btn_undo.setToolTip(tr('btn_undo'))
+        self.btn_clear_all.setToolTip(tr('btn_clear'))
+        self.btn_rec_start.setToolTip(tr('btn_record_start'))
+        self.btn_rec_pause.setToolTip(tr('btn_record_pause'))
+        self.btn_rec_stop.setToolTip(tr('btn_record_stop'))
+        self.btn_rec_export.setToolTip(tr('act_export_video'))
+        self.menuBar().clear()
+        self._create_menu_bar()
 
     def save_actions_json(self):
         if not self.recorder.events:
@@ -2666,6 +3213,15 @@ class FKVideoPlayer(QMainWindow):
             }
             #BtnExportRec:hover {
                 background-color: #267A49;
+            }
+            #BtnMicToggle {
+                background-color: #1A3824;
+                color: #34C759;
+                border: 1px solid #34C759;
+                font-weight: bold;
+            }
+            #BtnMicToggle:hover {
+                background-color: #244C30;
             }
             #RecStatus {
                 font-family: Consolas, monospace;
