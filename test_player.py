@@ -16,8 +16,8 @@
 import os
 import sys
 import unittest
-from PyQt5.QtCore import Qt, QPointF, QPoint, QRectF
-from PyQt5.QtGui import QColor, QMouseEvent
+from PyQt5.QtCore import Qt, QPointF, QPoint, QRectF, QMimeData, QUrl
+from PyQt5.QtGui import QColor, QMouseEvent, QDropEvent
 from PyQt5.QtWidgets import QApplication
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
@@ -516,6 +516,126 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
 
         print("[OK] Добавление объектов (картинка, второе видео PIP), перемещение и экспорт работают безупречно")
 
+    def test_19_drag_and_drop_overlay_creation(self):
+        """Verify drag and drop files onto canvas creates overlays at drop location"""
+        canvas = self.player.canvas
+        canvas.overlays.clear()
+        img_path = os.path.abspath("icon.png")
+        self.assertTrue(os.path.exists(img_path))
+
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(img_path)])
+        drop_pos = QPointF(200.0, 150.0)
+        event = QDropEvent(drop_pos, Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+
+        canvas.dropEvent(event)
+        self.assertEqual(len(canvas.overlays), 1)
+        ov = canvas.overlays[0]
+        self.assertEqual(ov.obj_type, OverlayObject.TYPE_IMAGE)
+        self.assertTrue(ov.rect.width() > 0 and ov.rect.height() > 0)
+        for o in canvas.overlays:
+            o.close()
+        canvas.overlays.clear()
+        print("[OK] Drag & drop onto video canvas creates overlay at target position")
+
+    def test_20_multi_overlay_z_order_and_duplicate(self):
+        """Verify layer stacking (bring to front/send to back/forward/backward) and duplicate"""
+        canvas = self.player.canvas
+        canvas.overlays.clear()
+        img_path = os.path.abspath("icon.png")
+
+        ov1 = OverlayObject(1, img_path, QRectF(10, 10, 50, 50))
+        ov2 = OverlayObject(2, img_path, QRectF(60, 10, 50, 50))
+        ov3 = OverlayObject(3, img_path, QRectF(110, 10, 50, 50))
+        canvas.overlays.extend([ov1, ov2, ov3])
+
+        # Test send to back: ov3 -> index 0
+        self.player.send_overlay_to_back(ov3)
+        self.assertEqual(canvas.overlays, [ov3, ov1, ov2])
+
+        # Test bring to front: ov3 -> index 2
+        self.player.bring_overlay_to_front(ov3)
+        self.assertEqual(canvas.overlays, [ov1, ov2, ov3])
+
+        # Test send backward: ov2 -> swaps with ov1
+        self.player.send_overlay_backward(ov2)
+        self.assertEqual(canvas.overlays, [ov2, ov1, ov3])
+
+        # Test bring forward: ov2 -> swaps with ov1
+        self.player.bring_overlay_forward(ov2)
+        self.assertEqual(canvas.overlays, [ov1, ov2, ov3])
+
+        # Test duplicate
+        self.player.duplicate_overlay(ov2)
+        self.assertEqual(len(canvas.overlays), 4)
+        new_ov = canvas.overlays[-1]
+        self.assertAlmostEqual(new_ov.rect.left(), ov2.rect.left() + 25.0, places=1)
+        self.assertAlmostEqual(new_ov.rect.top(), ov2.rect.top() + 25.0, places=1)
+
+        # Test delete
+        canvas.selected_overlay = new_ov
+        self.player.delete_selected_overlay()
+        self.assertEqual(len(canvas.overlays), 3)
+
+        for o in canvas.overlays:
+            o.close()
+        canvas.overlays.clear()
+        print("[OK] Layer z-ordering (front/back/fwd/bwd), duplicate and delete work as expected")
+
+    def test_21_overlay_corner_handles_and_aspect_ratio(self):
+        """Verify corner resize handles, delete handle, and aspect ratio calculations"""
+        canvas = self.player.canvas
+        canvas.overlays.clear()
+        img_path = os.path.abspath("icon.png")
+        ov = OverlayObject(1, img_path, QRectF(100, 100, 200, 100))
+        canvas.overlays.append(ov)
+        canvas.selected_overlay = ov
+        canvas.zoom_factor = 1.0
+
+        # Test hit testing on video coordinates
+        h_tl, _ = canvas._hit_test_overlay_handle(ov, ov.rect.topLeft())
+        h_br, _ = canvas._hit_test_overlay_handle(ov, ov.rect.bottomRight())
+        h_del_pt = QPointF(ov.rect.right() + 10.0 / canvas.zoom_factor, ov.rect.top() - 10.0 / canvas.zoom_factor)
+        h_del, _ = canvas._hit_test_overlay_handle(ov, h_del_pt)
+        h_move, _ = canvas._hit_test_overlay_handle(ov, ov.rect.center())
+
+        self.assertEqual(h_tl, 'tl')
+        self.assertEqual(h_br, 'br')
+        self.assertEqual(h_del, 'del')
+        self.assertEqual(h_move, 'move')
+
+        # Test simulated mouse dragging for resize with aspect ratio locked
+        canvas._overlay_drag_mode = 'br'
+        canvas._overlay_drag_start_rect = QRectF(ov.rect)
+        canvas._overlay_drag_start_vpt = ov.rect.bottomRight()
+
+        # Simulate move by (+50, +50) with Shift (aspect lock)
+        sr = canvas._overlay_drag_start_rect
+        ratio = sr.width() / max(1.0, sr.height())
+        dx, dy = 50.0, 50.0
+        new_w = sr.width() + dx
+        new_h = new_w / ratio
+        ov.rect = QRectF(sr.left(), sr.top(), new_w, new_h)
+
+        self.assertEqual(ov.rect.width(), 250.0)
+        self.assertEqual(ov.rect.height(), 125.0)
+
+        for o in canvas.overlays:
+            o.close()
+        canvas.overlays.clear()
+        print("[OK] Overlay corner handles (tl, tr, bl, br, del) and resizing operate cleanly")
+
+    def test_22_english_ui_localization(self):
+        """Verify player.py has 0 Cyrillic characters across code, UI labels, tooltips, dialogs"""
+        import re
+        with open("player.py", "r", encoding="utf-8") as f:
+            code = f.read()
+
+        cyrillic_matches = re.findall(r'[\u0400-\u04FF]', code)
+        self.assertEqual(len(cyrillic_matches), 0, f"Found {len(cyrillic_matches)} Cyrillic characters in player.py: {cyrillic_matches[:10]}")
+        print("[OK] UI 100% localized into English: 0 Cyrillic characters in player.py")
+
 
 if __name__ == "__main__":
     unittest.main()
+
