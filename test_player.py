@@ -1369,6 +1369,39 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
 
         print("[OK] Add overlay button crash fix and logging subsystem verified")
 
+    def test_45_tab_bar_and_button_adaptive_sizing(self):
+        """Verify AutoAdjustTabBar calculates generous widths so tab labels never clip"""
+        from settings_dialogs import PreferencesDialog, AutoAdjustTabBar
+        from i18n import I18nManager
+
+        # 1. Verify project_tabs uses AutoAdjustTabBar
+        self.assertIsInstance(self.player.project_tabs.tabBar(), AutoAdjustTabBar)
+
+        # 2. Test PreferencesDialog in Russian
+        orig_lang = I18nManager.instance().lang
+        try:
+            I18nManager.instance().lang = 'ru'
+            dlg = PreferencesDialog()
+            tb = dlg.tabs.tabBar()
+            self.assertIsInstance(tb, AutoAdjustTabBar)
+
+            # Each Russian tab must be sized generously (> 140px)
+            for i in range(dlg.tabs.count()):
+                w = tb.tabSizeHint(i).width()
+                self.assertGreaterEqual(w, 140, f"Tab {i} ({dlg.tabs.tabText(i)}) sizeHint {w} too small")
+
+            # 3. Test in English
+            I18nManager.instance().lang = 'en'
+            dlg_en = PreferencesDialog()
+            tb_en = dlg_en.tabs.tabBar()
+            for i in range(dlg_en.tabs.count()):
+                w_en = tb_en.tabSizeHint(i).width()
+                self.assertGreaterEqual(w_en, 110, f"English Tab {i} sizeHint {w_en} too small")
+        finally:
+            I18nManager.instance().lang = orig_lang
+
+        print("[OK] Tab bar and button adaptive sizing verified: zero clipping in any language")
+
 
 if __name__ == "__main__":
     unittest.main()

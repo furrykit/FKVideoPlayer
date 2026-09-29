@@ -15,10 +15,10 @@ import json
 import os
 import webbrowser
 from PyQt5.QtCore import Qt, QSize, pyqtSignal, QThread
-from PyQt5.QtGui import QFont, QColor, QIcon, QKeySequence
+from PyQt5.QtGui import QFont, QColor, QIcon, QKeySequence, QFontMetrics
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QComboBox, QSpinBox, QDoubleSpinBox, QSlider, QCheckBox, QTabWidget, QTableWidget, QTableWidgetItem,
+    QComboBox, QSpinBox, QDoubleSpinBox, QSlider, QCheckBox, QTabWidget, QTabBar, QTableWidget, QTableWidgetItem,
     QHeaderView, QFontDialog, QColorDialog, QFileDialog, QProgressBar,
     QMessageBox, QGroupBox, QRadioButton, QButtonGroup, QWidget, QTextEdit
 )
@@ -112,10 +112,10 @@ QPushButton {
     color: #FFFFFF;
     border: 1px solid #3E3E52;
     border-radius: 6px;
-    padding: 6px 12px;
+    padding: 6px 16px;
     font-size: 12px;
     font-weight: 500;
-    min-width: 0px;
+    min-height: 24px;
 }
 QPushButton:hover {
     background-color: #343448;
@@ -155,8 +155,7 @@ QTabWidget::pane {
 QTabBar::tab {
     background: #222230;
     color: #A0A0B8;
-    padding: 6px 12px;
-    min-width: 60px;
+    padding: 6px 14px;
     font-size: 12px;
     border-top-left-radius: 6px;
     border-top-right-radius: 6px;
@@ -170,6 +169,40 @@ QTabBar::tab:selected {
 }
 """
 
+
+class AutoAdjustTabBar(QTabBar):
+    """QTabBar that dynamically calculates tabSizeHint based on the actual
+    text font metrics (including bold state for selected tab and extra horizontal margin)
+    so tab titles are never cut off in any language, font, or DPI scaling."""
+
+    def __init__(self, parent=None, extra_padding=48, min_tab_width=110):
+        super().__init__(parent)
+        self.extra_padding = extra_padding
+        self.min_tab_width = min_tab_width
+
+    def tabSizeHint(self, index: int) -> QSize:
+        hint = super().tabSizeHint(index)
+        text = self.tabText(index)
+        if not text:
+            return hint
+
+        # Use bold font metrics to ensure tab has enough room even when selected and bold
+        f = self.font()
+        f.setBold(True)
+        if f.pointSize() < 9:
+            f.setPointSize(10)
+        fm = QFontMetrics(f)
+
+        text_w = fm.horizontalAdvance(text) if hasattr(fm, 'horizontalAdvance') else fm.width(text)
+        icon = self.tabIcon(index)
+        icon_w = (self.iconSize().width() + 8) if not icon.isNull() else 0
+        close_btn_w = 26 if self.tabsClosable() else 0
+
+        target_w = max(self.min_tab_width, text_w + icon_w + close_btn_w + self.extra_padding)
+        target_h = max(hint.height(), fm.height() + 16)
+        return QSize(target_w, target_h)
+
+
 # =========================================================================
 # 1. New Canvas Dialog
 # =========================================================================
@@ -178,7 +211,8 @@ class NewCanvasDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(tr('dlg_new_canvas_title'))
         self.setStyleSheet(DIALOG_STYLE)
-        self.setFixedSize(420, 360)
+        self.resize(450, 380)
+        self.setMinimumSize(430, 360)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
@@ -363,7 +397,8 @@ class TextOverlayDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(tr('dlg_text_title'))
         self.setStyleSheet(DIALOG_STYLE)
-        self.setFixedSize(450, 360)
+        self.resize(480, 400)
+        self.setMinimumSize(460, 380)
 
         self.font = initial_font or QFont("Segoe UI", 36, QFont.Bold)
         self.color = QColor(initial_color)
@@ -508,7 +543,8 @@ class ExportDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(tr('dlg_export_title'))
         self.setStyleSheet(DIALOG_STYLE)
-        self.setFixedSize(540, 560)
+        self.resize(580, 590)
+        self.setMinimumSize(560, 560)
 
         self.presets = dict(DEFAULT_EXPORT_PRESETS)
         self._load_custom_presets()
@@ -851,8 +887,8 @@ class PreferencesDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(tr('dlg_prefs_title'))
         self.setStyleSheet(DIALOG_STYLE)
-        self.resize(660, 520)
-        self.setMinimumSize(640, 480)
+        self.resize(680, 540)
+        self.setMinimumSize(660, 500)
 
         self.hotkeys = dict(DEFAULT_HOTKEYS)
         self._load_hotkeys()
@@ -860,6 +896,7 @@ class PreferencesDialog(QDialog):
         layout = QVBoxLayout(self)
 
         self.tabs = QTabWidget()
+        self.tabs.setTabBar(AutoAdjustTabBar(self.tabs, extra_padding=48, min_tab_width=110))
         self.tabs.setUsesScrollButtons(True)
         layout.addWidget(self.tabs)
 
@@ -1027,7 +1064,8 @@ class VideoOverlaySettingsDialog(QDialog):
         self.overlay = overlay
         self.setWindowTitle(tr('dlg_overlay_video_title'))
         self.setStyleSheet(DIALOG_STYLE)
-        self.setFixedSize(480, 440)
+        self.resize(520, 460)
+        self.setMinimumSize(490, 440)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -1240,7 +1278,8 @@ class AboutDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(tr('dlg_about_title'))
         self.setStyleSheet(DIALOG_STYLE)
-        self.setFixedSize(480, 410)
+        self.resize(520, 440)
+        self.setMinimumSize(490, 420)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -1317,7 +1356,8 @@ class WelcomeDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(tr('welcome_title'))
         self.setStyleSheet(DIALOG_STYLE)
-        self.setFixedSize(540, 460)
+        self.resize(560, 480)
+        self.setMinimumSize(530, 450)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
@@ -1471,7 +1511,8 @@ class UpdatesDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(tr('dlg_updates_title'))
         self.setStyleSheet(DIALOG_STYLE)
-        self.resize(520, 380)
+        self.resize(540, 400)
+        self.setMinimumSize(500, 360)
 
         self._worker = None
         self._download_url = DEFAULT_REPO_URL + "/releases"

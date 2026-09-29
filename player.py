@@ -30,7 +30,7 @@ from projects import ProjectManager
 from settings_dialogs import (
     NewCanvasDialog, WindowCaptureDialog, TextOverlayDialog,
     ExportDialog, PreferencesDialog, AboutDialog, UpdatesDialog,
-    VideoOverlaySettingsDialog,
+    VideoOverlaySettingsDialog, AutoAdjustTabBar,
     DEFAULT_HOTKEYS, HOTKEYS_CONFIG_PATH
 )
 
@@ -2915,6 +2915,7 @@ class FKVideoPlayer(QMainWindow):
 
         self.project_tabs = QTabWidget(self)
         self.project_tabs.setObjectName("ProjectTabs")
+        self.project_tabs.setTabBar(AutoAdjustTabBar(self.project_tabs, extra_padding=36, min_tab_width=110))
         self.project_tabs.setTabsClosable(True)
         self.project_tabs.setMovable(True)
         self.project_tabs.setDocumentMode(True)
@@ -4779,14 +4780,14 @@ class FKVideoPlayer(QMainWindow):
                 color: #A0A0B8;
                 border: 1px solid #262638;
                 border-bottom: none;
-                padding: 5px 14px;
-                margin-right: 2px;
+                padding: 6px 16px;
+                margin-right: 3px;
                 border-top-left-radius: 5px;
                 border-top-right-radius: 5px;
                 font-size: 11px;
                 font-weight: 500;
-                min-width: 80px;
-                max-width: 220px;
+                min-width: 90px;
+                max-width: 320px;
             }
             QTabBar::tab:selected {
                 background-color: #1F1F2E;
@@ -4879,11 +4880,12 @@ class FKVideoPlayer(QMainWindow):
                 color: #E2E2EC;
                 border: 1px solid #3B3B4E;
                 border-radius: 5px;
-                padding: 4px 6px;
+                padding: 4px 8px;
                 font-weight: 500;
                 font-size: 11px;
                 font-family: 'Segoe UI', Arial, sans-serif;
                 min-width: 0px;
+                min-height: 22px;
             }
             QPushButton:hover {
                 background-color: #373748;
@@ -5000,8 +5002,21 @@ VideoPlayerWindow = FKVideoPlayer
 
 def main():
     init_logging()
+    if hasattr(Qt, 'AA_EnableHighDpiScaling'):
+        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    if hasattr(Qt, 'AA_UseHighDpiPixmaps'):
+        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+
     logger.info("Initializing QApplication")
     app = QApplication(sys.argv)
+
+    # Set uniform scalable UI font so layout metrics match rendered text exactly
+    app_font = app.font()
+    app_font.setFamily("Segoe UI")
+    app_font.setStyleHint(QFont.SansSerif)
+    app_font.setPointSize(9)
+    app.setFont(app_font)
+
     icon_path = resource_path("icon.ico")
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
