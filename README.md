@@ -50,7 +50,9 @@
 ### 💾 Advanced Export & Custom Presets
 - Custom resolution scaling (1080p, 720p, 4K, or custom width x height).
 - Flexible codecs: `H.264 (libx264)`, `HEVC / H.265`, `VP9`, `MPEG-4`.
-- Dynamic bitrate, custom FPS selection, and custom preset saving.
+- **Rate Control (CBR / VBR):** Select Constant Bitrate (CBR) for strict streaming compliance or Variable Bitrate (VBR) for optimized file size and quality.
+- **Custom Bitrate Controls:** Enter arbitrary custom bitrate (0.1 to 300 Mbps) with real-time preset synchronization and custom preset persistence.
+- **Custom FPS & Resolution:** Full custom width, height, and frame rate (15 to 120 FPS).
 
 ### 🔄 Multi-Project Tabs & Native Auto-Updater
 - **Tabbed Workspace:** Open and edit multiple independent video projects simultaneously with isolated timelines, undo/redo stacks, and canvases.

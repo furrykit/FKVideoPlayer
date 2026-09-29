@@ -954,11 +954,21 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         dlg.spin_fps.setValue(45)
         self.assertEqual(dlg.combo_presets.currentText(), "Custom (User Defined)")
 
+        # Changing bitrate spin should retain Custom selection and update cfg
+        dlg.spin_bitrate.setValue(18.5)
+        self.assertEqual(dlg.combo_presets.currentText(), "Custom (User Defined)")
+
+        # Changing rate control to CBR
+        idx_cbr = dlg.combo_rate_control.findData("cbr")
+        dlg.combo_rate_control.setCurrentIndex(idx_cbr)
+
         cfg = dlg.get_export_config()
         self.assertEqual(cfg['width'], 1440)
         self.assertEqual(cfg['fps'], 45.0)
+        self.assertEqual(cfg['bitrate'], '18.5M')
+        self.assertEqual(cfg['rate_control'], 'cbr')
         dlg.close()
-        print("[OK] Custom export preset selection and dynamic parameter switching verified")
+        print("[OK] Custom export preset selection, custom bitrate, and CBR/VBR switching verified")
 
     def test_37_video_overlay_seeking(self):
         """Verify video overlay seeking (seconds, frame, relative stepping) and freeze bug fix"""
@@ -1214,6 +1224,57 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         dlg.close()
 
         print("[OK] FFmpeg detection and GitHub updater dialog verified")
+
+    def test_42_custom_bitrate_and_cbr_vbr_export(self):
+        """Verify CBR and VBR encoding with custom bitrate via ExportVideoWorker"""
+        events = [
+            {'type': 'frame', 'time': 0.0, 'frame_idx': 0, 'zoom': 1.0, 'pan': (0, 0)},
+            {'type': 'stop', 'time': 0.2}
+        ]
+
+        # 1. Test CBR export
+        out_cbr = os.path.abspath("test_cbr_export.mp4")
+        if os.path.exists(out_cbr):
+            os.remove(out_cbr)
+
+        worker_cbr = ExportVideoWorker(
+            video_path=self.video_path,
+            events=events,
+            total_duration=0.2,
+            output_path=out_cbr,
+            fps=30.0,
+            out_size=(320, 240),
+            codec='libx264',
+            bitrate='6.5M',
+            rate_control='cbr'
+        )
+        worker_cbr.run()
+        self.assertTrue(os.path.exists(out_cbr), "CBR exported video should exist")
+        self.assertGreater(os.path.getsize(out_cbr), 500)
+        os.remove(out_cbr)
+
+        # 2. Test VBR export with custom decimal bitrate
+        out_vbr = os.path.abspath("test_vbr_export.mp4")
+        if os.path.exists(out_vbr):
+            os.remove(out_vbr)
+
+        worker_vbr = ExportVideoWorker(
+            video_path=self.video_path,
+            events=events,
+            total_duration=0.2,
+            output_path=out_vbr,
+            fps=30.0,
+            out_size=(320, 240),
+            codec='libx264',
+            bitrate='14.2M',
+            rate_control='vbr'
+        )
+        worker_vbr.run()
+        self.assertTrue(os.path.exists(out_vbr), "VBR exported video should exist")
+        self.assertGreater(os.path.getsize(out_vbr), 500)
+        os.remove(out_vbr)
+
+        print("[OK] Custom bitrate and CBR/VBR encoding verified")
 
 
 if __name__ == "__main__":

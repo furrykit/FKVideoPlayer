@@ -1954,7 +1954,7 @@ class ExportVideoWorker(QThread):
     finished = pyqtSignal(bool, str)
 
     def __init__(self, video_path, events, total_duration, output_path, fps=30.0, out_size=None,
-                 codec='libx264', bitrate='10M', audio_path=None):
+                 codec='libx264', bitrate='10M', rate_control='vbr', audio_path=None):
         super().__init__()
         self.video_path = video_path
         self.events = events
@@ -1964,6 +1964,7 @@ class ExportVideoWorker(QThread):
         self.out_size = out_size
         self.codec = codec or 'libx264'
         self.bitrate = bitrate or '10M'
+        self.rate_control = (rate_control or 'vbr').lower()
         self.audio_path = audio_path
         self._is_cancelled = False
 
@@ -2026,22 +2027,75 @@ class ExportVideoWorker(QThread):
             stream.width = out_w
             stream.height = out_h
             stream.pix_fmt = 'yuv420p'
+            def parse_bitrate_to_bps(b) -> int:
+                s = str(b).strip().upper()
+                if s.endswith('M'):
+                    try:
+                        return int(float(s[:-1]) * 1_000_000)
+                    except Exception:
+                        pass
+                elif s.endswith('K'):
+                    try:
+                        return int(float(s[:-1]) * 1_000)
+                    except Exception:
+                        pass
+                try:
+                    return int(float(s))
+                except Exception:
+                    return 10_000_000
+
+            b_val = parse_bitrate_to_bps(self.bitrate)
+            is_cbr = (self.rate_control == 'cbr')
+
             if pyav_codec == 'h264':
-                stream.options = {'crf': '20', 'preset': 'veryfast'}
+                stream.bit_rate = b_val
+                if is_cbr:
+                    stream.options = {
+                        'preset': 'veryfast',
+                        'b': str(b_val),
+                        'minrate': str(b_val),
+                        'maxrate': str(b_val),
+                        'bufsize': str(b_val * 2)
+                    }
+                else:
+                    stream.options = {
+                        'preset': 'veryfast',
+                        'crf': '20',
+                        'maxrate': str(int(b_val * 1.5)),
+                        'bufsize': str(b_val * 2)
+                    }
             elif pyav_codec == 'hevc':
-                stream.options = {'crf': '23', 'preset': 'veryfast'}
+                stream.bit_rate = b_val
+                if is_cbr:
+                    stream.options = {
+                        'preset': 'veryfast',
+                        'b': str(b_val),
+                        'minrate': str(b_val),
+                        'maxrate': str(b_val),
+                        'bufsize': str(b_val * 2)
+                    }
+                else:
+                    stream.options = {
+                        'preset': 'veryfast',
+                        'crf': '23',
+                        'maxrate': str(int(b_val * 1.5)),
+                        'bufsize': str(b_val * 2)
+                    }
             elif pyav_codec == 'vp9':
-                stream.options = {'crf': '28', 'b': '0'}
+                stream.bit_rate = b_val
+                if is_cbr:
+                    stream.options = {
+                        'b': str(b_val),
+                        'minrate': str(b_val),
+                        'maxrate': str(b_val)
+                    }
+                else:
+                    stream.options = {'crf': '28', 'b': str(b_val)}
             elif pyav_codec == 'prores':
                 stream.options = {'profile': '3'}
                 stream.pix_fmt = 'yuv422p10le'
-
-            if self.bitrate and pyav_codec not in ('vp9', 'prores'):
-                try:
-                    b_val = int(str(self.bitrate).upper().replace('M', '000000').replace('K', '000'))
-                    stream.bit_rate = b_val
-                except Exception:
-                    pass
+            else:
+                stream.bit_rate = b_val
         except Exception:
             use_pyav = False
             if container:
@@ -4102,7 +4156,8 @@ class FKVideoPlayer(QMainWindow):
             fps=cfg['fps'],
             out_size=(cfg['width'], cfg['height']),
             codec=cfg['codec'],
-            bitrate=cfg['bitrate'],
+            bitrate=cfg.get('bitrate', '10M'),
+            rate_control=cfg.get('rate_control', 'vbr'),
             audio_path=audio_target
         )
 
