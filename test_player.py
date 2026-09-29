@@ -1225,8 +1225,8 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
 
         # 3. Verify UpdatesDialog initialization
         dlg = UpdatesDialog(parent=self.player)
-        self.assertIsNotNone(dlg.edit_repo)
-        self.assertIn("furrykit/FKVideoPlayer", dlg.edit_repo.text())
+        self.assertFalse(hasattr(dlg, 'edit_repo'))
+        self.assertEqual(dlg.repo, "furrykit/FKVideoPlayer")
         self.assertIsNotNone(dlg.txt_notes)
         self.assertIsNotNone(dlg.lbl_status)
         dlg.close()

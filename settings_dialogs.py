@@ -1487,9 +1487,7 @@ class UpdatesDialog(QDialog):
         h_ver.addStretch()
         layout.addLayout(h_ver)
 
-        layout.addWidget(QLabel(tr('updates_repo_url')))
-        self.edit_repo = QLineEdit(DEFAULT_REPO_URL)
-        layout.addWidget(self.edit_repo)
+        self.repo = "furrykit/FKVideoPlayer"
 
         self.lbl_status = QLabel(tr('updates_checking'))
         self.lbl_status.setStyleSheet("color: #007AFF; font-weight: bold; font-size: 14px;")
@@ -1525,10 +1523,7 @@ class UpdatesDialog(QDialog):
         self.btn_dl.setEnabled(False)
         self.txt_notes.clear()
 
-        repo_text = self.edit_repo.text().strip()
-        repo = repo_text.replace("https://github.com/", "").replace("http://github.com/", "").strip("/")
-        if not repo:
-            repo = "furrykit/FKVideoPlayer"
+        repo = getattr(self, "repo", "furrykit/FKVideoPlayer")
 
         self._worker = GitHubUpdateCheckerWorker(repo=repo, current_version=CURRENT_VERSION, parent=self)
         self._worker.finished.connect(self._on_check_finished)
