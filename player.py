@@ -3983,20 +3983,21 @@ class FKVideoPlayer(QMainWindow):
                 return
 
         # Start microphone recording if enabled
+        temp_dir = tempfile.gettempdir()
         if self.is_mic_enabled:
-            self.temp_mic_wav_path = os.path.abspath(f"temp_mic_{int(time.time())}.wav")
+            self.temp_mic_wav_path = os.path.join(temp_dir, f"temp_mic_{int(time.time())}_{os.getpid()}.wav")
             self.mic_recorder.start_recording(self.temp_mic_wav_path, self.selected_mic_device)
 
         # Window capture frame and system audio recording
         if self.is_capturing_window:
-            self.temp_capture_video_path = os.path.abspath(f"temp_capture_{int(time.time())}.mp4")
+            self.temp_capture_video_path = os.path.join(temp_dir, f"temp_capture_{int(time.time())}_{os.getpid()}.mp4")
             self.temp_capture_writer = None
             self.temp_capture_writer_size = None
             self._capture_frame_count = 0
             self.current_frame_idx = 0
             self.total_frames = 0
             self.video_path = self.temp_capture_video_path
-            self.temp_sys_wav_path = os.path.abspath(f"temp_sys_{int(time.time())}.wav")
+            self.temp_sys_wav_path = os.path.join(temp_dir, f"temp_sys_{int(time.time())}_{os.getpid()}.wav")
             if hasattr(self, 'sys_audio_recorder'):
                 self.sys_audio_recorder.start_recording(self.temp_sys_wav_path)
 
@@ -4127,7 +4128,7 @@ class FKVideoPlayer(QMainWindow):
                 import subprocess
                 ffmpeg_exe = get_ffmpeg_path()
                 if ffmpeg_exe and os.path.exists(ffmpeg_exe):
-                    mixed_wav = os.path.abspath(f"temp_mixed_{int(time.time())}.wav")
+                    mixed_wav = os.path.join(tempfile.gettempdir(), f"temp_mixed_{int(time.time())}_{os.getpid()}.wav")
                     cmd = [
                         ffmpeg_exe, "-y",
                         "-i", self.last_sys_wav,
@@ -4424,6 +4425,19 @@ class FKVideoPlayer(QMainWindow):
                     return
         for proj in self.projects:
             proj.close()
+
+        # Clean up session temporary audio/video files
+        for p in [getattr(self, 'temp_mic_wav_path', None),
+                  getattr(self, 'temp_sys_wav_path', None),
+                  getattr(self, 'temp_capture_video_path', None),
+                  getattr(self, 'last_mic_wav', None),
+                  getattr(self, 'last_sys_wav', None)]:
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+
         event.accept()
 
     def _create_menu_bar(self):
