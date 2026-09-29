@@ -211,25 +211,37 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         print("[OK] Рисование, 'Стереть на шаг назад' и 'Стереть всё' работают безупречно")
 
     def test_08_eraser_segment_intersection(self):
-        """Проверка ластика на пересечение отрезков линий"""
+        """Проверка ластика на частичное стирание (Photoshop / Paint style) и полное удаление"""
         canvas = self.player.canvas
         canvas.strokes.clear()
         canvas.undo_stack.clear()
 
-        # Длинная линия от (0, 0) до (200, 200) всего из 2 точек
+        # Длинная линия от (0, 0) до (200, 200)
         s = Stroke(QColor("#0000FF"), 4.0, [QPointF(0, 0), QPointF(200, 200)])
         canvas.strokes.append(s)
         canvas.undo_stack.append(('add', s))
         self.assertEqual(len(canvas.strokes), 1)
 
-        # Ластик проходит через середину линии (100, 100), где нет явной вершины
+        # Ластик проходит через середину линии (100, 100)
+        # В Photoshop/Paint стиле линия разделяется на 2 отдельных штриха вокруг точки стирания
         canvas.erase_strokes_at_video_pt(QPointF(100, 100))
-        self.assertEqual(len(canvas.strokes), 0)
+        self.assertEqual(len(canvas.strokes), 2)
+        # Проверяем, что первая часть заканчивается до ластика, а вторая начинается после
+        self.assertLess(canvas.strokes[0].points[-1].x(), 100.0)
+        self.assertGreater(canvas.strokes[1].points[0].x(), 100.0)
 
-        # Отмена стирания восстанавливает линию
+        # Отмена стирания восстанавливает исходную целую линию
         canvas.undo_last_action()
         self.assertEqual(len(canvas.strokes), 1)
-        print("[OK] Ластик безошибочно стирает штрихи при пересечении отрезков")
+        self.assertEqual(canvas.strokes[0].points[0], QPointF(0, 0))
+        self.assertEqual(canvas.strokes[0].points[-1], QPointF(200, 200))
+
+        # Одиночный штрих (точка), полностью покрытый ластиком, удаляется в 0
+        dot_s = Stroke(QColor("#FF0000"), 4.0, [QPointF(50, 50)])
+        canvas.strokes.append(dot_s)
+        canvas.erase_strokes_at_video_pt(QPointF(50, 50))
+        self.assertNotIn(dot_s, canvas.strokes)
+        print("[OK] Ластик безошибочно стирает штрихи в Photoshop/Paint стиле (разрезая и удаляя части)")
 
     def test_09_colors_palette_and_active_highlight(self):
         """Проверка палитры цветов и активной подсветки кнопок"""
@@ -1283,6 +1295,47 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         os.remove(out_vbr)
 
         print("[OK] Custom bitrate and CBR/VBR encoding verified")
+
+    def test_43_photoshop_eraser_and_size_setting(self):
+        """Verify dynamic eraser size settings, toolbar synchronization, and multi-segment carving"""
+        player = self.player
+        canvas = player.canvas
+
+        # 1. Switch to pen tool: spin_width should show Brush Size
+        player._select_tool(VideoCanvas.TOOL_PEN)
+        self.assertEqual(player.lbl_tool_size.text(), "Brush Size:")
+        player.spin_width.setValue(12)
+        self.assertEqual(canvas.pen_width, 12.0)
+
+        # 2. Switch to eraser tool: spin_width should show Eraser Size and reflect eraser_radius
+        player._select_tool(VideoCanvas.TOOL_ERASER)
+        self.assertEqual(player.lbl_tool_size.text(), "Eraser Size:")
+        self.assertEqual(player.spin_width.value(), int(round(canvas.eraser_radius)))
+
+        # 3. Change eraser size via spinbox
+        player.spin_width.setValue(24)
+        self.assertEqual(canvas.eraser_radius, 24.0)
+
+        # 4. Draw horizontal stroke and carve hole with custom radius 20
+        canvas.zoom_factor = 1.0
+        canvas.strokes.clear()
+        canvas.undo_stack.clear()
+        s = Stroke(QColor("#FF0000"), 4.0, [QPointF(x, 100) for x in range(0, 201, 10)])
+        canvas.strokes.append(s)
+
+        canvas.set_eraser_radius(20.0)
+        canvas.erase_strokes_at_video_pt(QPointF(100, 100))
+        # Stroke must be carved into 2 pieces
+        self.assertEqual(len(canvas.strokes), 2)
+        self.assertLess(canvas.strokes[0].points[-1].x(), 85.0)
+        self.assertGreater(canvas.strokes[1].points[0].x(), 115.0)
+
+        # 5. Undo restores original stroke
+        canvas.undo_last_action()
+        self.assertEqual(len(canvas.strokes), 1)
+        self.assertEqual(len(canvas.strokes[0].points), 21)
+
+        print("[OK] Dynamic eraser size and Photoshop-style stroke carving verified")
 
 
 if __name__ == "__main__":

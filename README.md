@@ -44,6 +44,8 @@
 - **Automatic Audio Muxing:** Both streams are mixed via bundled FFmpeg (`amix`) and muxed into the final video output.
 
 ### ✏️ Annotation & Drawing Studio
+- **Photoshop / Paint-Style Partial Eraser:** The eraser cuts out and carves holes in existing lines with adjustable tip radius, rather than deleting entire strokes.
+- **Dynamic Tool Size Setting:** Easily adjust brush stroke width and eraser tip radius via the interactive Size control (or hotkeys `[` and `]`).
 - **Vector Drawing Tools:** Brush, Highlighter, Arrows, Rectangles, Circles, and Text overlays.
 - **Action Timeline Recording:** Record cursor motion, annotations, clicks, and drawing events with accurate sub-millisecond timestamps.
 

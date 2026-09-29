@@ -62,7 +62,7 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 
 def get_ffmpeg_path():
@@ -111,6 +111,77 @@ def dist_to_segment_sq(p: QPointF, a: QPointF, b: QPointF) -> float:
     dx = p.x() - proj_x
     dy = p.y() - proj_y
     return dx * dx + dy * dy
+
+
+def simplify_points(pts: list, tol: float = 0.8) -> list:
+    """Ramer-Douglas-Peucker-like fast polyline simplifier to keep point counts minimal"""
+    if len(pts) <= 2:
+        return pts
+    result = [pts[0]]
+    tol2 = tol * tol
+    for i in range(1, len(pts) - 1):
+        prev = result[-1]
+        cur = pts[i]
+        nxt = pts[i + 1]
+        dx = nxt.x() - prev.x()
+        dy = nxt.y() - prev.y()
+        l2 = dx * dx + dy * dy
+        if l2 < 1e-6:
+            continue
+        t = max(0.0, min(1.0, ((cur.x() - prev.x()) * dx + (cur.y() - prev.y()) * dy) / l2))
+        px = prev.x() + t * dx
+        py = prev.y() + t * dy
+        dist2 = (cur.x() - px) ** 2 + (cur.y() - py) ** 2
+        if dist2 > tol2:
+            result.append(cur)
+    result.append(pts[-1])
+    return result
+
+
+def erase_stroke_subsegments(pts: list, center: QPointF, radius: float, stroke_width: float) -> list:
+    """
+    Sub-segment stroke carving: like Paint/Photoshop, cuts out and erases
+    only the portion of the stroke under the circular eraser tip rather than
+    deleting the whole stroke.
+    """
+    import math
+    eff_r = radius + (stroke_width * 0.5)
+    r2 = eff_r * eff_r
+    if not pts:
+        return []
+    if len(pts) == 1:
+        dx = pts[0].x() - center.x()
+        dy = pts[0].y() - center.y()
+        if (dx * dx + dy * dy) <= r2:
+            return []
+        return [pts]
+
+    dense_pts = [pts[0]]
+    for i in range(len(pts) - 1):
+        p1 = pts[i]
+        p2 = pts[i + 1]
+        dist = math.hypot(p2.x() - p1.x(), p2.y() - p1.y())
+        step = max(2.0, min(5.0, stroke_width * 0.5))
+        n_steps = max(1, int(dist / step))
+        for s in range(1, n_steps + 1):
+            t = s / float(n_steps)
+            dense_pts.append(QPointF(p1.x() + t * (p2.x() - p1.x()), p1.y() + t * (p2.y() - p1.y())))
+
+    new_segments = []
+    current_run = []
+    for pt in dense_pts:
+        dx = pt.x() - center.x()
+        dy = pt.y() - center.y()
+        if (dx * dx + dy * dy) > r2:
+            current_run.append(pt)
+        else:
+            if current_run:
+                new_segments.append(simplify_points(current_run))
+                current_run = []
+    if current_run:
+        new_segments.append(simplify_points(current_run))
+
+    return new_segments
 
 
 class ClickableSlider(QSlider):
@@ -882,6 +953,11 @@ class VideoCanvas(QWidget):
         self.update_cursor()
         self.update()
 
+    def set_eraser_radius(self, radius):
+        self.eraser_radius = max(2.0, float(radius))
+        self.update_cursor()
+        self.update()
+
     def set_frame(self, frame_bgr_or_qimg):
         if frame_bgr_or_qimg is None:
             self.current_qimage = None
@@ -1008,6 +1084,14 @@ class VideoCanvas(QWidget):
             stroke, original_idx = payload
             idx = min(original_idx, len(self.strokes))
             self.strokes.insert(idx, stroke)
+        elif action_type == 'modify':
+            # payload: list of tuples (orig_stroke, replaced_strokes, orig_idx)
+            for orig_stroke, replaced_strokes, orig_idx in reversed(payload):
+                for r in replaced_strokes:
+                    if r in self.strokes:
+                        self.strokes.remove(r)
+                idx = min(orig_idx, len(self.strokes))
+                self.strokes.insert(idx, orig_stroke)
         elif action_type == 'clear':
             self.strokes = list(payload)
 
@@ -1018,40 +1102,85 @@ class VideoCanvas(QWidget):
         self.drawing_changed.emit()
 
     def erase_strokes_at_video_pt(self, video_pt: QPointF):
+        """
+        Partial eraser: erases strokes like in MS Paint or Photoshop.
+        Cuts out the circle of radius `eraser_radius` from intersecting strokes,
+        splitting them into sub-segments rather than blindly deleting whole lines.
+        """
         erased_any = False
         radius_video = self.eraser_radius / max(0.01, self.zoom_factor)
         r2 = radius_video * radius_video
 
-        indices_to_remove = []
+        # Find strokes that are intersected by the eraser circle
+        to_modify = []
         for i, stroke in enumerate(self.strokes):
             pts = stroke.points
             if not pts:
                 continue
+            eff_r = radius_video + (stroke.width * 0.5)
+            eff_r2 = eff_r * eff_r
             if len(pts) == 1:
                 dx = pts[0].x() - video_pt.x()
                 dy = pts[0].y() - video_pt.y()
-                if (dx * dx + dy * dy) <= r2:
-                    indices_to_remove.append(i)
+                if (dx * dx + dy * dy) <= eff_r2:
+                    to_modify.append((i, stroke))
                 continue
 
             hit = False
             for j in range(len(pts) - 1):
-                if dist_to_segment_sq(video_pt, pts[j], pts[j + 1]) <= r2:
+                if dist_to_segment_sq(video_pt, pts[j], pts[j + 1]) <= eff_r2:
                     hit = True
                     break
             if hit:
-                indices_to_remove.append(i)
+                to_modify.append((i, stroke))
 
+        if not to_modify:
+            return
+
+        undo_batch = []
         erased_ids = []
-        for idx in reversed(indices_to_remove):
-            removed = self.strokes.pop(idx)
-            self.undo_stack.append(('erase', (removed, idx)))
-            if hasattr(removed, 'stroke_id') and removed.stroke_id is not None:
-                erased_ids.append(removed.stroke_id)
+        # Process from highest index down so insertions/removals keep indices clean
+        for idx, old_stroke in reversed(to_modify):
+            sub_point_lists = erase_stroke_subsegments(
+                old_stroke.points, video_pt, radius_video, old_stroke.width
+            )
+            created_replacements = []
+            for s_pts in sub_point_lists:
+                if len(s_pts) == 1:
+                    new_sid = self.recorder.allocate_stroke_id() if self.recorder else len(self.strokes) + 1
+                    new_s = Stroke(old_stroke.color, old_stroke.width, s_pts, stroke_id=new_sid)
+                    created_replacements.append(new_s)
+                elif len(s_pts) >= 2:
+                    new_sid = self.recorder.allocate_stroke_id() if self.recorder else len(self.strokes) + 1
+                    new_s = Stroke(old_stroke.color, old_stroke.width, s_pts, stroke_id=new_sid)
+                    created_replacements.append(new_s)
+
+            # Replace old_stroke at idx with created_replacements
+            self.strokes.pop(idx)
+            for offset, r_stroke in enumerate(created_replacements):
+                self.strokes.insert(idx + offset, r_stroke)
+
+            undo_batch.append((old_stroke, created_replacements, idx))
+            if hasattr(old_stroke, 'stroke_id') and old_stroke.stroke_id is not None:
+                erased_ids.append(old_stroke.stroke_id)
             erased_any = True
+
+        if undo_batch:
+            self.undo_stack.append(('modify', undo_batch))
 
         if self.recorder and erased_ids:
             self.recorder.record_erase(erased_ids)
+            # Record newly created carved stroke pieces so video export matches live canvas
+            for old_stroke, created_replacements, _ in undo_batch:
+                for r_stroke in created_replacements:
+                    if r_stroke.points:
+                        self.recorder.record_stroke_start(
+                            r_stroke.stroke_id, r_stroke.color.name(), r_stroke.width,
+                            (r_stroke.points[0].x(), r_stroke.points[0].y())
+                        )
+                        for pt in r_stroke.points[1:]:
+                            self.recorder.record_stroke_point(r_stroke.stroke_id, (pt.x(), pt.y()))
+                        self.recorder.record_stroke_end(r_stroke.stroke_id)
 
         if erased_any:
             self.update()
@@ -2913,12 +3042,13 @@ class FKVideoPlayer(QMainWindow):
         layout.addWidget(self.color_indicator)
         self._update_color_buttons_state("#FF3B30")
 
-        layout.addWidget(QLabel("Size:"))
+        self.lbl_tool_size = QLabel("Brush Size:")
+        layout.addWidget(self.lbl_tool_size)
         self.spin_width = QSpinBox()
-        self.spin_width.setRange(1, 60)
+        self.spin_width.setRange(1, 100)
         self.spin_width.setValue(4)
         self.spin_width.setSuffix(" px")
-        self.spin_width.setToolTip("Brush stroke width ([ and ])")
+        self.spin_width.setToolTip("Brush / Eraser size ([ and ])")
         self.spin_width.valueChanged.connect(self._on_pen_width_changed)
         layout.addWidget(self.spin_width)
 
@@ -3553,6 +3683,16 @@ class FKVideoPlayer(QMainWindow):
         self.btn_tool_select.setChecked(tool_code == VideoCanvas.TOOL_SELECT)
         self.canvas.set_tool(tool_code)
 
+        if hasattr(self, 'spin_width') and hasattr(self, 'lbl_tool_size'):
+            self.spin_width.blockSignals(True)
+            if tool_code == VideoCanvas.TOOL_ERASER:
+                self.lbl_tool_size.setText("Eraser Size:")
+                self.spin_width.setValue(int(round(self.canvas.eraser_radius)))
+            else:
+                self.lbl_tool_size.setText("Brush Size:")
+                self.spin_width.setValue(int(round(self.canvas.pen_width)))
+            self.spin_width.blockSignals(False)
+
     def _update_color_buttons_state(self, current_hex):
         current_hex = current_hex.upper()
         for hex_code, btn in self.preset_color_buttons.items():
@@ -3581,7 +3721,10 @@ class FKVideoPlayer(QMainWindow):
             self._set_brush_color(col.name())
 
     def _on_pen_width_changed(self, val):
-        self.canvas.set_pen_width(val)
+        if self.canvas.active_tool == VideoCanvas.TOOL_ERASER:
+            self.canvas.set_eraser_radius(val)
+        else:
+            self.canvas.set_pen_width(val)
 
     def _on_canvas_zoom_changed(self, zoom):
         self.lbl_zoom.setText(f"{int(round(zoom * 100))}%")
