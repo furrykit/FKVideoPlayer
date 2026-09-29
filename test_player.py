@@ -197,18 +197,25 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         canvas.undo_stack.append(('add', s2))
         self.assertEqual(len(canvas.strokes), 2)
 
-        # Отмена шага
+        # Отмена шага через метод
         canvas.undo_last_action()
         self.assertEqual(len(canvas.strokes), 1)
 
-        # Стереть всё
-        canvas.clear_all_drawings()
-        self.assertEqual(len(canvas.strokes), 0)
+        # Добавим штрих и проверим отмену через кнопку btn_undo
+        canvas.strokes.append(s2)
+        canvas.undo_stack.append(('add', s2))
+        self.assertEqual(len(canvas.strokes), 2)
+        self.player.btn_undo.click()
+        self.assertEqual(len(canvas.strokes), 1, "btn_undo.click() must undo last stroke")
 
-        # Отмена очистки возвращает штрихи
-        canvas.undo_last_action()
-        self.assertEqual(len(canvas.strokes), 1)
-        print("[OK] Рисование, 'Стереть на шаг назад' и 'Стереть всё' работают безупречно")
+        # Проверим кнопку btn_clear_all
+        self.player.btn_clear_all.click()
+        self.assertEqual(len(canvas.strokes), 0, "btn_clear_all.click() must clear all drawings")
+
+        # Отмена очистки через btn_undo возвращает штрихи
+        self.player.btn_undo.click()
+        self.assertEqual(len(canvas.strokes), 1, "btn_undo.click() must restore cleared drawings")
+        print("[OK] Рисование, 'Стереть на шаг назад' и 'Стереть всё' (включая UI кнопки) работают безупречно")
 
     def test_08_eraser_segment_intersection(self):
         """Проверка ластика на частичное стирание (Photoshop / Paint style) и полное удаление"""

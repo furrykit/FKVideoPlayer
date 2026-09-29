@@ -990,7 +990,7 @@ class VideoCanvas(QWidget):
     def set_bgr_frame(self, frame_bgr):
         self.set_frame(frame_bgr)
 
-    def fit_to_view(self):
+    def fit_to_view(self, *args):
         if self.video_width <= 0 or self.video_height <= 0:
             self.zoom_factor = 1.0
             self.pan_offset = QPointF(0, 0)
@@ -1008,13 +1008,13 @@ class VideoCanvas(QWidget):
         self.update()
         self.zoom_changed.emit(self.zoom_factor)
 
-    def zoom_in(self):
+    def zoom_in(self, *args):
         self.apply_zoom_at(self.zoom_factor * 1.25, QPointF(self.width() / 2, self.height() / 2))
 
-    def zoom_out(self):
+    def zoom_out(self, *args):
         self.apply_zoom_at(self.zoom_factor / 1.25, QPointF(self.width() / 2, self.height() / 2))
 
-    def reset_zoom_100(self):
+    def reset_zoom_100(self, *args):
         self.zoom_factor = 1.0
         self.pan_offset = QPointF(0, 0)
         self.update()
@@ -1059,7 +1059,7 @@ class VideoCanvas(QWidget):
         sy = origin.y() + pt.y() * self.zoom_factor
         return QPointF(sx, sy)
 
-    def clear_all_drawings(self):
+    def clear_all_drawings(self, *args):
         if not self.strokes:
             return
         self.undo_stack.append(('clear', list(self.strokes)))
@@ -1069,7 +1069,7 @@ class VideoCanvas(QWidget):
         self.update()
         self.drawing_changed.emit()
 
-    def undo_last_action(self):
+    def undo_last_action(self, *args):
         if not self.undo_stack:
             if self.strokes:
                 self.strokes.pop()
@@ -3060,12 +3060,12 @@ class FKVideoPlayer(QMainWindow):
 
         self.btn_undo = QPushButton("↩ Undo")
         self.btn_undo.setToolTip("Undo last drawing action (Ctrl+Z)")
-        self.btn_undo.clicked.connect(self.canvas.undo_last_action)
+        self.btn_undo.clicked.connect(self.undo_last_action)
         layout.addWidget(self.btn_undo)
 
         self.btn_clear_all = QPushButton("🗑 Clear")
         self.btn_clear_all.setToolTip("Clear all drawings (Delete / C)")
-        self.btn_clear_all.clicked.connect(self.canvas.clear_all_drawings)
+        self.btn_clear_all.clicked.connect(self.clear_all_drawings)
         layout.addWidget(self.btn_clear_all)
 
         layout.addStretch(1)
@@ -3146,15 +3146,15 @@ class FKVideoPlayer(QMainWindow):
 
         self.btn_zoom_out = QPushButton("🔍-")
         self.btn_zoom_out.setToolTip("Zoom out (-)")
-        self.btn_zoom_out.clicked.connect(self.canvas.zoom_out)
+        self.btn_zoom_out.clicked.connect(self.zoom_out)
 
         self.btn_zoom_in = QPushButton("🔍+")
         self.btn_zoom_in.setToolTip("Zoom in (+)")
-        self.btn_zoom_in.clicked.connect(self.canvas.zoom_in)
+        self.btn_zoom_in.clicked.connect(self.zoom_in)
 
         self.btn_zoom_reset = QPushButton("1:1")
         self.btn_zoom_reset.setToolTip("Fit to window (0)")
-        self.btn_zoom_reset.clicked.connect(self.canvas.fit_to_view)
+        self.btn_zoom_reset.clicked.connect(self.fit_to_view)
 
         layout.addWidget(self.btn_zoom_out)
         layout.addWidget(self.lbl_zoom)
@@ -3320,11 +3320,11 @@ class FKVideoPlayer(QMainWindow):
         reg_sc(Qt.Key_Up, lambda: self.adjust_volume(5))
         reg_sc(Qt.Key_Down, lambda: self.adjust_volume(-5))
 
-        reg_sc(cfg_hotkeys.get("undo", "Ctrl+Z"), self.canvas.undo_last_action)
+        reg_sc(cfg_hotkeys.get("undo", "Ctrl+Z"), self.undo_last_action)
         reg_sc(cfg_hotkeys.get("delete_overlay", "Delete"), self._on_delete_shortcut)
         reg_sc(Qt.Key_Backspace, self._on_delete_shortcut)
         reg_sc(cfg_hotkeys.get("duplicate_overlay", "Ctrl+D"), self._on_duplicate_shortcut)
-        reg_sc("C", self.canvas.clear_all_drawings)
+        reg_sc("C", self.clear_all_drawings)
 
         reg_sc("[", lambda: self.spin_width.setValue(self.spin_width.value() - 1))
         reg_sc("]", lambda: self.spin_width.setValue(self.spin_width.value() + 1))
@@ -3335,10 +3335,10 @@ class FKVideoPlayer(QMainWindow):
         reg_sc("Shift+.", self.increase_speed)
         reg_sc("R", self.reset_speed)
 
-        reg_sc("+", self.canvas.zoom_in)
-        reg_sc("=", self.canvas.zoom_in)
-        reg_sc("-", self.canvas.zoom_out)
-        reg_sc("0", self.canvas.fit_to_view)
+        reg_sc("+", self.zoom_in)
+        reg_sc("=", self.zoom_in)
+        reg_sc("-", self.zoom_out)
+        reg_sc("0", self.fit_to_view)
 
         reg_sc(cfg_hotkeys.get("tool_brush", "P"), lambda: self._select_tool(VideoCanvas.TOOL_PEN))
         reg_sc("B", lambda: self._select_tool(VideoCanvas.TOOL_PEN))
@@ -3496,6 +3496,31 @@ class FKVideoPlayer(QMainWindow):
 
         if len(self.projects) == 0:
             self.new_project_tab(name="Project 1", project_type="empty")
+
+    def undo_last_action(self, *args):
+        c = self.canvas
+        if c:
+            c.undo_last_action(*args)
+
+    def clear_all_drawings(self, *args):
+        c = self.canvas
+        if c:
+            c.clear_all_drawings(*args)
+
+    def zoom_in(self, *args):
+        c = self.canvas
+        if c:
+            c.zoom_in(*args)
+
+    def zoom_out(self, *args):
+        c = self.canvas
+        if c:
+            c.zoom_out(*args)
+
+    def fit_to_view(self, *args):
+        c = self.canvas
+        if c:
+            c.fit_to_view(*args)
 
     def delete_selected_overlay(self):
         if self.canvas.selected_overlay:
