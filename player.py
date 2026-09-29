@@ -3032,6 +3032,7 @@ class FKVideoPlayer(QMainWindow):
         layout.addWidget(QLabel("Color:"))
         for hex_code, name in preset_colors:
             btn = QPushButton()
+            btn.setObjectName("ColorPresetBtn")
             btn.setFixedSize(20, 20)
             btn.setToolTip(f"{name} ({hex_code})")
             btn.setCursor(Qt.PointingHandCursor)
@@ -3040,12 +3041,14 @@ class FKVideoPlayer(QMainWindow):
             self.preset_color_buttons[hex_code.upper()] = btn
 
         self.btn_custom_color = QPushButton("🎨")
+        self.btn_custom_color.setObjectName("ColorCustomBtn")
         self.btn_custom_color.setToolTip("Choose custom brush color...")
         self.btn_custom_color.setFixedSize(24, 24)
         self.btn_custom_color.clicked.connect(self._pick_custom_color)
         layout.addWidget(self.btn_custom_color)
 
         self.color_indicator = QFrame()
+        self.color_indicator.setObjectName("ColorIndicator")
         self.color_indicator.setFixedSize(18, 18)
         self.color_indicator.setToolTip("Current brush color")
         layout.addWidget(self.color_indicator)
@@ -3737,15 +3740,38 @@ class FKVideoPlayer(QMainWindow):
         for hex_code, btn in self.preset_color_buttons.items():
             if hex_code == current_hex:
                 btn.setStyleSheet(
-                    f"background-color: {hex_code}; border-radius: 10px; border: 2px solid #FFFFFF; outline: 2px solid #007AFF;"
+                    f"QPushButton#ColorPresetBtn, QPushButton {{"
+                    f"  background-color: {hex_code};"
+                    f"  min-width: 16px; max-width: 16px;"
+                    f"  min-height: 16px; max-height: 16px;"
+                    f"  border-radius: 10px;"
+                    f"  border: 2px solid #FFFFFF;"
+                    f"  outline: none;"
+                    f"  padding: 0px; margin: 0px;"
+                    f"}}"
                 )
             else:
                 btn.setStyleSheet(
-                    f"background-color: {hex_code}; border-radius: 10px; border: 2px solid #484858;"
+                    f"QPushButton#ColorPresetBtn, QPushButton {{"
+                    f"  background-color: {hex_code};"
+                    f"  min-width: 16px; max-width: 16px;"
+                    f"  min-height: 16px; max-height: 16px;"
+                    f"  border-radius: 10px;"
+                    f"  border: 2px solid #484858;"
+                    f"  outline: none;"
+                    f"  padding: 0px; margin: 0px;"
+                    f"}}"
                 )
 
         self.color_indicator.setStyleSheet(
-            f"background-color: {current_hex}; border: 2px solid #FFFFFF; border-radius: 4px;"
+            f"QFrame#ColorIndicator, QFrame {{"
+            f"  background-color: {current_hex};"
+            f"  min-width: 14px; max-width: 14px;"
+            f"  min-height: 14px; max-height: 14px;"
+            f"  border: 2px solid #FFFFFF;"
+            f"  border-radius: 4px;"
+            f"  padding: 0px; margin: 0px;"
+            f"}}"
         )
 
     def _set_brush_color(self, hex_color):
@@ -5005,6 +5031,34 @@ class FKVideoPlayer(QMainWindow):
             }
             #PlayButton:hover {
                 background-color: #2CAC4B;
+            }
+            QPushButton#ColorPresetBtn {
+                min-width: 16px;
+                max-width: 16px;
+                min-height: 16px;
+                max-height: 16px;
+                padding: 0px;
+                margin: 0px;
+                border-radius: 10px;
+            }
+            QPushButton#ColorCustomBtn {
+                min-width: 22px;
+                max-width: 22px;
+                min-height: 22px;
+                max-height: 22px;
+                padding: 0px;
+                margin: 0px;
+                border-radius: 4px;
+                font-size: 13px;
+            }
+            QFrame#ColorIndicator {
+                min-width: 14px;
+                max-width: 14px;
+                min-height: 14px;
+                max-height: 14px;
+                padding: 0px;
+                margin: 0px;
+                border-radius: 4px;
             }
             QSpinBox, QComboBox {
                 background-color: #2A2A38;
