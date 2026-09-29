@@ -23,8 +23,6 @@
 
 ---
 
-![FKVideoPlayer Main Interface](assets/screenshots/main_player.png)
-
 ## Why FKVideoPlayer?
 
 Most video players fall into two extremes:
@@ -61,14 +59,6 @@ Most video players fall into two extremes:
 
 ### 5. Multi-Project Tabs
 - Work on multiple videos, blank drawing canvases, or live window streams in parallel with isolated timelines, undo/redo stacks, and export settings.
-
----
-
-## Screenshots
-
-| Drawing & Annotations | Multi-Project Workspace |
-|:---:|:---:|
-| ![Annotation](assets/screenshots/annotation_drawing.png) | ![Workspace](assets/screenshots/tabbed_workspace.png) |
 
 ---
 
@@ -145,8 +135,7 @@ The compiled single-file binary will appear in `dist/FKVideoPlayer.exe`.
 ```text
 FKVideoPlayer/
 ├── assets/
-│   ├── branding/              # Application icons and branding assets
-│   └── screenshots/           # UI screenshots and visual walkthroughs
+│   └── branding/              # Application icons and branding assets
 ├── fkplayer/                  # Core package
 │   ├── app.py                 # Application bootstrap and dark titlebar
 │   ├── core/                  # Engine logic (i18n, logger, projects, recorder)
@@ -158,7 +147,8 @@ FKVideoPlayer/
 ├── pyproject.toml             # PEP 517/621 build configuration
 ├── requirements.txt           # Production dependencies
 ├── LICENSE                    # MIT License
-└── README.md                  # Documentation
+├── README.md                  # Documentation (English)
+└── README_RU.md               # Documentation (Russian)
 ```
 
 ---
