@@ -65,7 +65,7 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 
 
 def get_ffmpeg_path():
