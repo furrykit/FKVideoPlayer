@@ -1,0 +1,8 @@
+PyQt5>=5.15.9
+opencv-python>=4.8.0
+av>=10.0.0
+numpy>=1.24.0
+soundcard>=0.4.2
+soundfile>=0.12.1
+Pillow>=9.5.0
+pywin32>=306
