@@ -66,40 +66,59 @@ class MicrophoneRecorder(QObject):
         self.final_wav_path = output_wav_path
         self.device_name = device_name
 
-        # Prepare audio format
-        format = QAudioFormat()
-        format.setSampleRate(self.sample_rate)
-        format.setChannelCount(self.channels)
-        format.setSampleSize(16)
-        format.setCodec("audio/pcm")
-        format.setByteOrder(QAudioFormat.LittleEndian)
-        format.setSampleType(QAudioFormat.SignedInt)
+        try:
+            # Prepare audio format
+            format = QAudioFormat()
+            format.setSampleRate(self.sample_rate)
+            format.setChannelCount(self.channels)
+            format.setSampleSize(16)
+            format.setCodec("audio/pcm")
+            format.setByteOrder(QAudioFormat.LittleEndian)
+            format.setSampleType(QAudioFormat.SignedInt)
 
-        device_info = QAudioDeviceInfo.defaultInputDevice()
-        if device_name:
-            for d in QAudioDeviceInfo.availableDevices(QAudio.AudioInput):
-                if d.deviceName().strip() == device_name.strip():
-                    device_info = d
-                    break
+            device_info = QAudioDeviceInfo.defaultInputDevice()
+            if device_name:
+                for d in QAudioDeviceInfo.availableDevices(QAudio.AudioInput):
+                    if d.deviceName().strip() == device_name.strip():
+                        device_info = d
+                        break
 
-        if not device_info.isFormatSupported(format):
-            format = device_info.nearestFormat(format)
-            self.sample_rate = format.sampleRate()
-            self.channels = format.channelCount()
+            if device_info.isNull():
+                return False
 
-        # Temporary raw PCM file
-        fd, self.temp_pcm_path = tempfile.mkstemp(suffix='.pcm')
-        os.close(fd)
+            if not device_info.isFormatSupported(format):
+                format = device_info.nearestFormat(format)
+                self.sample_rate = format.sampleRate()
+                self.channels = format.channelCount()
 
-        self.temp_pcm_file = QFile(self.temp_pcm_path)
-        if not self.temp_pcm_file.open(QIODevice.WriteOnly | QIODevice.Truncate):
+            # Temporary raw PCM file
+            fd, self.temp_pcm_path = tempfile.mkstemp(suffix='.pcm')
+            os.close(fd)
+
+            self.temp_pcm_file = QFile(self.temp_pcm_path)
+            if not self.temp_pcm_file.open(QIODevice.WriteOnly | QIODevice.Truncate):
+                return False
+
+            self.audio_input = QAudioInput(device_info, format)
+            self.audio_input.setVolume(1.0)
+            self.audio_input.start(self.temp_pcm_file)
+            self.is_recording = True
+            return True
+        except Exception:
+            self.is_recording = False
+            if self.temp_pcm_file:
+                try:
+                    self.temp_pcm_file.close()
+                except Exception:
+                    pass
+                self.temp_pcm_file = None
+            if self.temp_pcm_path and os.path.exists(self.temp_pcm_path):
+                try:
+                    os.remove(self.temp_pcm_path)
+                except Exception:
+                    pass
+                self.temp_pcm_path = None
             return False
-
-        self.audio_input = QAudioInput(device_info, format)
-        self.audio_input.setVolume(1.0)
-        self.audio_input.start(self.temp_pcm_file)
-        self.is_recording = True
-        return True
 
     def stop_recording(self) -> str:
         """Stops recording and returns path to final WAV file"""

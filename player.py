@@ -675,31 +675,31 @@ class OverlayTrackRow(QFrame):
         s = sec % 60
         return f"{m:02d}:{s:04.1f}"
 
-    def _toggle_play(self):
+    def _toggle_play(self, *args):
         if hasattr(self.overlay, 'is_playing'):
             self.overlay.is_playing = not getattr(self.overlay, 'is_playing', True)
             if hasattr(self, 'btn_play'):
                 self.btn_play.setText("❚❚" if self.overlay.is_playing else "▶")
             self.player.canvas.update()
 
-    def _toggle_aspect(self):
+    def _toggle_aspect(self, *args):
         cur = getattr(self.overlay, 'keep_aspect_ratio', True)
         self.overlay.keep_aspect_ratio = not cur
         self.btn_aspect.setText("🔗" if self.overlay.keep_aspect_ratio else "🔓")
         self.player.canvas.update()
 
-    def _toggle_visibility(self):
+    def _toggle_visibility(self, *args):
         cur = getattr(self.overlay, 'is_visible', True)
         self.overlay.is_visible = not cur
         self.btn_vis.setText("👁️" if self.overlay.is_visible else "🚫")
         self.player.canvas.update()
 
-    def _open_settings(self):
+    def _open_settings(self, *args):
         dlg = VideoOverlaySettingsDialog(self.overlay, parent=self.player)
         dlg.exec_()
         self.player.canvas.update()
 
-    def _delete_overlay(self):
+    def _delete_overlay(self, *args):
         self.player.canvas.remove_overlay(self.overlay)
 
     def _on_slider_pressed(self):
@@ -1025,7 +1025,7 @@ class VideoCanvas(QWidget):
         if abs(target_zoom - self.zoom_factor) < 1e-4:
             return
 
-        old_zoom = self.zoom_factor
+        old_zoom = max(1e-4, self.zoom_factor)
         old_origin = self._get_origin(old_zoom, self.pan_offset)
 
         video_x = (center_pt.x() - old_origin.x()) / old_zoom
@@ -1048,9 +1048,10 @@ class VideoCanvas(QWidget):
         return QPointF(ox, oy)
 
     def screen_to_video(self, pt: QPointF) -> QPointF:
-        origin = self._get_origin(self.zoom_factor, self.pan_offset)
-        vx = (pt.x() - origin.x()) / self.zoom_factor
-        vy = (pt.y() - origin.y()) / self.zoom_factor
+        zf = max(1e-4, self.zoom_factor)
+        origin = self._get_origin(zf, self.pan_offset)
+        vx = (pt.x() - origin.x()) / zf
+        vy = (pt.y() - origin.y()) / zf
         return QPointF(vx, vy)
 
     def video_to_screen(self, pt: QPointF) -> QPointF:
@@ -1727,7 +1728,7 @@ class VideoCanvas(QWidget):
 
     def wheelEvent(self, event):
         num_degrees = event.angleDelta().y() / 8.0
-        num_steps = num_degrees / 15.0
+        num_steps = max(-10.0, min(10.0, num_degrees / 15.0))
         factor = 1.15 ** num_steps
         self.apply_zoom_at(self.zoom_factor * factor, QPointF(event.pos()))
         event.accept()
@@ -1737,100 +1738,104 @@ class VideoCanvas(QWidget):
         self.update()
 
     def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        try:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
-        painter.fillRect(self.rect(), QColor("#121216"))
-        origin = self._get_origin(self.zoom_factor, self.pan_offset)
+            painter.fillRect(self.rect(), QColor("#121216"))
+            zf = max(1e-4, self.zoom_factor)
+            origin = self._get_origin(zf, self.pan_offset)
 
-        if self.current_qimage is not None and not self.current_qimage.isNull():
-            painter.save()
-            painter.translate(origin.x(), origin.y())
-            painter.scale(self.zoom_factor, self.zoom_factor)
-
-            painter.drawImage(0, 0, self.current_qimage)
-            painter.setPen(QPen(QColor(60, 60, 75, 180), 1.0 / self.zoom_factor))
-            painter.drawRect(0, 0, self.video_width, self.video_height)
-
-            cur_time = self._get_current_time()
-            for ov in self.overlays:
-                ov_img = ov.get_frame_at_time(cur_time)
-                if ov_img and not ov_img.isNull():
-                    painter.save()
-                    if hasattr(ov, 'opacity') and ov.opacity < 1.0:
-                        painter.setOpacity(ov.opacity)
-                    painter.drawImage(ov.rect, ov_img)
-                    painter.restore()
-
-                if ov == self.hover_overlay and ov not in self.selected_overlays and self.active_tool == self.TOOL_SELECT:
-                    painter.save()
-                    hover_pen = QPen(QColor(0, 229, 255, 120), 1.5 / self.zoom_factor, Qt.DashLine)
-                    painter.setPen(hover_pen)
-                    painter.setBrush(Qt.NoBrush)
-                    painter.drawRect(ov.rect)
-                    painter.restore()
-
-                if ov in self.selected_overlays and self.active_tool == self.TOOL_SELECT:
-                    painter.save()
-                    sel_pen = QPen(QColor("#00E5FF"), 1.8 / self.zoom_factor, Qt.DashLine)
-                    painter.setPen(sel_pen)
-                    painter.setBrush(Qt.NoBrush)
-                    painter.drawRect(ov.rect)
-
-                    hs = 12.0 / self.zoom_factor
-                    r = ov.rect
-                    painter.setPen(QPen(QColor("#007AFF"), 1.0 / self.zoom_factor))
-                    painter.setBrush(QBrush(QColor("#00E5FF")))
-                    painter.drawRect(QRectF(r.left() - hs / 2, r.top() - hs / 2, hs, hs))
-                    painter.drawRect(QRectF(r.right() - hs / 2, r.top() - hs / 2, hs, hs))
-                    painter.drawRect(QRectF(r.left() - hs / 2, r.bottom() - hs / 2, hs, hs))
-                    painter.drawRect(QRectF(r.right() - hs / 2, r.bottom() - hs / 2, hs, hs))
-
-                    btn_r = 9.0 / self.zoom_factor
-                    btn_center = QPointF(r.right() + 10.0 / self.zoom_factor, r.top() - 10.0 / self.zoom_factor)
-                    painter.setPen(Qt.NoPen)
-                    painter.setBrush(QBrush(QColor("#FF3B30")))
-                    painter.drawEllipse(btn_center, btn_r, btn_r)
-                    painter.setPen(QPen(QColor("#FFFFFF"), 1.5 / self.zoom_factor))
-                    del_d = 4.0 / self.zoom_factor
-                    painter.drawLine(QPointF(btn_center.x() - del_d, btn_center.y() - del_d),
-                                     QPointF(btn_center.x() + del_d, btn_center.y() + del_d))
-                    painter.drawLine(QPointF(btn_center.x() + del_d, btn_center.y() - del_d),
-                                     QPointF(btn_center.x() - del_d, btn_center.y() + del_d))
-                    painter.restore()
-
-            if self.active_tool == self.TOOL_SELECT and self._is_rubber_banding and self._rubber_band_rect:
+            if self.current_qimage is not None and not self.current_qimage.isNull():
                 painter.save()
-                rb = self._rubber_band_rect.normalized()
-                painter.setBrush(QBrush(QColor(0, 122, 255, 45)))
-                painter.setPen(QPen(QColor(0, 229, 255, 220), 1.5 / self.zoom_factor, Qt.DashLine))
-                painter.drawRect(rb)
+                painter.translate(origin.x(), origin.y())
+                painter.scale(zf, zf)
+
+                painter.drawImage(0, 0, self.current_qimage)
+                painter.setPen(QPen(QColor(60, 60, 75, 180), 1.0 / zf))
+                painter.drawRect(0, 0, self.video_width, self.video_height)
+
+                cur_time = self._get_current_time()
+                for ov in self.overlays:
+                    ov_img = ov.get_frame_at_time(cur_time)
+                    if ov_img and not ov_img.isNull():
+                        painter.save()
+                        if hasattr(ov, 'opacity') and ov.opacity < 1.0:
+                            painter.setOpacity(ov.opacity)
+                        painter.drawImage(ov.rect, ov_img)
+                        painter.restore()
+
+                    if ov == self.hover_overlay and ov not in self.selected_overlays and self.active_tool == self.TOOL_SELECT:
+                        painter.save()
+                        hover_pen = QPen(QColor(0, 229, 255, 120), 1.5 / zf, Qt.DashLine)
+                        painter.setPen(hover_pen)
+                        painter.setBrush(Qt.NoBrush)
+                        painter.drawRect(ov.rect)
+                        painter.restore()
+
+                    if ov in self.selected_overlays and self.active_tool == self.TOOL_SELECT:
+                        painter.save()
+                        sel_pen = QPen(QColor("#00E5FF"), 1.8 / zf, Qt.DashLine)
+                        painter.setPen(sel_pen)
+                        painter.setBrush(Qt.NoBrush)
+                        painter.drawRect(ov.rect)
+
+                        hs = 12.0 / zf
+                        r = ov.rect
+                        painter.setPen(QPen(QColor("#007AFF"), 1.0 / zf))
+                        painter.setBrush(QBrush(QColor("#00E5FF")))
+                        painter.drawRect(QRectF(r.left() - hs / 2, r.top() - hs / 2, hs, hs))
+                        painter.drawRect(QRectF(r.right() - hs / 2, r.top() - hs / 2, hs, hs))
+                        painter.drawRect(QRectF(r.left() - hs / 2, r.bottom() - hs / 2, hs, hs))
+                        painter.drawRect(QRectF(r.right() - hs / 2, r.bottom() - hs / 2, hs, hs))
+
+                        btn_r = 9.0 / zf
+                        btn_center = QPointF(r.right() + 10.0 / zf, r.top() - 10.0 / zf)
+                        painter.setPen(Qt.NoPen)
+                        painter.setBrush(QBrush(QColor("#FF3B30")))
+                        painter.drawEllipse(btn_center, btn_r, btn_r)
+                        painter.setPen(QPen(QColor("#FFFFFF"), 1.5 / zf))
+                        del_d = 4.0 / zf
+                        painter.drawLine(QPointF(btn_center.x() - del_d, btn_center.y() - del_d),
+                                         QPointF(btn_center.x() + del_d, btn_center.y() + del_d))
+                        painter.drawLine(QPointF(btn_center.x() + del_d, btn_center.y() - del_d),
+                                         QPointF(btn_center.x() - del_d, btn_center.y() + del_d))
+                        painter.restore()
+
+                if self.active_tool == self.TOOL_SELECT and self._is_rubber_banding and self._rubber_band_rect:
+                    painter.save()
+                    rb = self._rubber_band_rect.normalized()
+                    painter.setBrush(QBrush(QColor(0, 122, 255, 45)))
+                    painter.setPen(QPen(QColor(0, 229, 255, 220), 1.5 / zf, Qt.DashLine))
+                    painter.drawRect(rb)
+                    painter.restore()
+
+                for stroke in self.strokes:
+                    if not stroke.points:
+                        continue
+                    pen = QPen(stroke.color, stroke.width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+                    painter.setPen(pen)
+
+                    if len(stroke.points) == 1:
+                        painter.setBrush(QBrush(stroke.color))
+                        r = stroke.width / 2.0
+                        painter.drawEllipse(stroke.points[0], r, r)
+                    else:
+                        painter.setBrush(Qt.NoBrush)
+                        painter.drawPath(stroke.path)
+
                 painter.restore()
-
-            for stroke in self.strokes:
-                if not stroke.points:
-                    continue
-                pen = QPen(stroke.color, stroke.width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-                painter.setPen(pen)
-
-                if len(stroke.points) == 1:
-                    painter.setBrush(QBrush(stroke.color))
-                    r = stroke.width / 2.0
-                    painter.drawEllipse(stroke.points[0], r, r)
-                else:
-                    painter.setBrush(Qt.NoBrush)
-                    painter.drawPath(stroke.path)
-
-            painter.restore()
-        else:
-            painter.setPen(QColor("#7E7E94"))
-            painter.setFont(QFont("Segoe UI", 13, QFont.Bold))
-            painter.drawText(
-                self.rect(),
-                Qt.AlignCenter,
-                "Click 'Open' (O) or Drag & Drop a video file here\n(Drop images, GIFs, or videos to add overlays)"
-            )
+            else:
+                painter.setPen(QColor("#7E7E94"))
+                painter.setFont(QFont("Segoe UI", 13, QFont.Bold))
+                painter.drawText(
+                    self.rect(),
+                    Qt.AlignCenter,
+                    "Click 'Open' (O) or Drag & Drop a video file here\n(Drop images, GIFs, or videos to add overlays)"
+                )
+        except Exception as e:
+            logger.error(f"Error in VideoCanvas.paintEvent: {e}")
 
 
 class ActionRecorder:
@@ -2898,7 +2903,7 @@ class FKVideoPlayer(QMainWindow):
             if settings.value("show_welcome", True, type=bool):
                 QTimer.singleShot(250, self.open_welcome_dialog)
 
-    def open_welcome_dialog(self):
+    def open_welcome_dialog(self, *args):
         from settings_dialogs import WelcomeDialog
         dlg = WelcomeDialog(parent=self)
         dlg.exec_()
@@ -3697,7 +3702,7 @@ class FKVideoPlayer(QMainWindow):
             self.toggle_mute()
         self.set_volume(self.current_volume + delta)
 
-    def toggle_mute(self):
+    def toggle_mute(self, *args):
         self.is_muted = not self.is_muted
         self.audio_player.setMuted(self.is_muted)
         self._update_mute_icon()
@@ -3749,7 +3754,7 @@ class FKVideoPlayer(QMainWindow):
         if self.canvas.active_tool != VideoCanvas.TOOL_PEN:
             self._select_tool(VideoCanvas.TOOL_PEN)
 
-    def _pick_custom_color(self):
+    def _pick_custom_color(self, *args):
         col = QColorDialog.getColor(self.canvas.pen_color, self, "Select Brush Color")
         if col.isValid():
             self._set_brush_color(col.name())
@@ -3768,7 +3773,7 @@ class FKVideoPlayer(QMainWindow):
     def _on_drawing_changed(self):
         pass
 
-    def open_file_dialog(self):
+    def open_file_dialog(self, *args):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select Video File",
@@ -3779,83 +3784,87 @@ class FKVideoPlayer(QMainWindow):
             self.load_video(file_path)
 
     def load_video(self, file_path, in_new_tab=None):
-        if in_new_tab or (in_new_tab is None and self.active_project and not self.active_project.is_empty()):
-            self.new_project_tab(name=os.path.basename(file_path), project_type="video")
-
-        if self.cap is not None:
-            self.cap.release()
-            self.pause()
-
-        self.cap = cv2.VideoCapture(file_path)
-        if not self.cap.isOpened():
-            logger.error(f"Failed to open video file with OpenCV: {file_path}")
-            QMessageBox.critical(self, "Error", f"Failed to open video file:\n{file_path}")
-            return
-
-        self.video_path = file_path
-        self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.fps = float(self.cap.get(cv2.CAP_PROP_FPS))
-        if self.fps <= 1.0 or np.isnan(self.fps):
-            self.fps = 25.0
-        logger.info(f"Loaded video: {file_path} (frames={self.total_frames}, fps={self.fps:.2f})")
-
-        self.frame_cache.clear()
-        self._cap_pos = 0
-
-        self._cleanup_temp_audio()
-        self.has_audio = False
         try:
-            container = av.open(file_path)
-            if len(container.streams.audio) > 0:
-                temp_wav = os.path.join(tempfile.gettempdir(), f"fk_snd_{os.getpid()}_{int(cv2.getTickCount())}.wav")
-                resampler = av.AudioResampler(format='s16', layout='stereo', rate=44100)
-                with wave.open(temp_wav, 'wb') as wav_file:
-                    wav_file.setnchannels(2)
-                    wav_file.setsampwidth(2)
-                    wav_file.setframerate(44100)
-                    for frame in container.decode(audio=0):
-                        for r in resampler.resample(frame):
-                            wav_file.writeframes(r.to_ndarray().tobytes())
-                self.temp_audio_path = temp_wav
-                self.has_audio = True
-            container.close()
-        except Exception:
+            if in_new_tab or (in_new_tab is None and self.active_project and not self.active_project.is_empty()):
+                self.new_project_tab(name=os.path.basename(file_path), project_type="video")
+
+            if self.cap is not None:
+                self.cap.release()
+                self.pause()
+
+            self.cap = cv2.VideoCapture(file_path)
+            if not self.cap.isOpened():
+                logger.error(f"Failed to open video file with OpenCV: {file_path}")
+                QMessageBox.critical(self, "Error", f"Failed to open video file:\n{file_path}")
+                return
+
+            self.video_path = file_path
+            self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            self.fps = float(self.cap.get(cv2.CAP_PROP_FPS))
+            if self.fps <= 1.0 or np.isnan(self.fps):
+                self.fps = 25.0
+            logger.info(f"Loaded video: {file_path} (frames={self.total_frames}, fps={self.fps:.2f})")
+
+            self.frame_cache.clear()
+            self._cap_pos = 0
+
+            self._cleanup_temp_audio()
             self.has_audio = False
+            try:
+                container = av.open(file_path)
+                if len(container.streams.audio) > 0:
+                    temp_wav = os.path.join(tempfile.gettempdir(), f"fk_snd_{os.getpid()}_{int(cv2.getTickCount())}.wav")
+                    resampler = av.AudioResampler(format='s16', layout='stereo', rate=44100)
+                    with wave.open(temp_wav, 'wb') as wav_file:
+                        wav_file.setnchannels(2)
+                        wav_file.setsampwidth(2)
+                        wav_file.setframerate(44100)
+                        for frame in container.decode(audio=0):
+                            for r in resampler.resample(frame):
+                                wav_file.writeframes(r.to_ndarray().tobytes())
+                    self.temp_audio_path = temp_wav
+                    self.has_audio = True
+                container.close()
+            except Exception:
+                self.has_audio = False
 
-        if getattr(self, 'has_audio', False) and getattr(self, 'temp_audio_path', None) and os.path.exists(self.temp_audio_path):
-            media_url = QUrl.fromLocalFile(self.temp_audio_path)
-            self.audio_player.setMedia(QMediaContent(media_url))
-            self.audio_player.setVolume(self.current_volume if not self.is_muted else 0)
-            self.audio_player.setPosition(0)
-        else:
-            self.audio_player.setMedia(QMediaContent())
+            if getattr(self, 'has_audio', False) and getattr(self, 'temp_audio_path', None) and os.path.exists(self.temp_audio_path):
+                media_url = QUrl.fromLocalFile(self.temp_audio_path)
+                self.audio_player.setMedia(QMediaContent(media_url))
+                self.audio_player.setVolume(self.current_volume if not self.is_muted else 0)
+                self.audio_player.setPosition(0)
+            else:
+                self.audio_player.setMedia(QMediaContent())
 
-        self.timeline_slider.fps = self.fps
-        self.timeline_slider.setRange(0, max(0, self.total_frames - 1))
-        self.timeline_slider.setValue(0)
-        self.current_frame_idx = 0
+            self.timeline_slider.fps = self.fps
+            self.timeline_slider.setRange(0, max(0, self.total_frames - 1))
+            self.timeline_slider.setValue(0)
+            self.current_frame_idx = 0
 
-        self.canvas.strokes.clear()
-        self.canvas.undo_stack.clear()
+            self.canvas.strokes.clear()
+            self.canvas.undo_stack.clear()
 
-        tab_name = os.path.basename(file_path)
-        if self.active_project:
-            self.active_project.name = tab_name
-            self.active_project.project_type = 'video'
-        if hasattr(self, 'project_tabs'):
-            cur_idx = self.project_tabs.currentIndex()
-            if cur_idx >= 0:
-                self.project_tabs.setTabText(cur_idx, tab_name)
+            tab_name = os.path.basename(file_path)
+            if self.active_project:
+                self.active_project.name = tab_name
+                self.active_project.project_type = 'video'
+            if hasattr(self, 'project_tabs'):
+                cur_idx = self.project_tabs.currentIndex()
+                if cur_idx >= 0:
+                    self.project_tabs.setTabText(cur_idx, tab_name)
 
-        self._seek_to_frame(0)
-        self.setWindowTitle(f"FKVideoPlayer — {tab_name}")
-        self._stop_window_capture()
-        if self.cap:
-            ProjectManager.instance().add_project(
-                'video', tab_name, file_path,
-                int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            )
-            self._refresh_recent_projects_menu()
+            self._seek_to_frame(0)
+            self.setWindowTitle(f"FKVideoPlayer — {tab_name}")
+            self._stop_window_capture()
+            if self.cap:
+                ProjectManager.instance().add_project(
+                    'video', tab_name, file_path,
+                    int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                )
+                self._refresh_recent_projects_menu()
+        except Exception as e:
+            logger.error(f"Error loading video '{file_path}': {e}")
+            QMessageBox.critical(self, "Error", f"Failed to load video file:\n{e}")
 
     def _cleanup_temp_audio(self):
         if getattr(self, 'temp_audio_path', None) and os.path.exists(self.temp_audio_path):
@@ -3911,11 +3920,12 @@ class FKVideoPlayer(QMainWindow):
                 self.timeline_slider.blockSignals(False)
 
     def _sync_audio_position(self):
-        if not self.is_playing and self.fps > 0 and self.cap is not None:
-            target_ms = int((self.current_frame_idx / self.fps) * 1000)
+        if not self.is_playing and self.cap is not None:
+            safe_fps = max(1.0, self.fps)
+            target_ms = int((self.current_frame_idx / safe_fps) * 1000)
             self.audio_player.setPosition(target_ms)
 
-    def toggle_play_pause(self):
+    def toggle_play_pause(self, *args):
         if self.is_playing:
             self.pause()
         else:
@@ -3932,7 +3942,8 @@ class FKVideoPlayer(QMainWindow):
         self.is_playing = True
         self.btn_play_pause.setText("❚❚ Pause")
 
-        target_ms = int((self.current_frame_idx / self.fps) * 1000)
+        safe_fps = max(1.0, self.fps)
+        target_ms = int((self.current_frame_idx / safe_fps) * 1000)
         self.audio_player.setPosition(target_ms)
         self._update_audio_rate()
         self.audio_player.play()
@@ -3999,7 +4010,7 @@ class FKVideoPlayer(QMainWindow):
 
                 if 0.5 <= self.playback_speed <= 2.0 and not self.is_muted:
                     audio_pos = self.audio_player.position()
-                    expected_audio_pos = int((next_frame / self.fps) * 1000)
+                    expected_audio_pos = int((next_frame / max(1.0, self.fps)) * 1000)
                     if abs(audio_pos - expected_audio_pos) > 150:
                         self.audio_player.setPosition(expected_audio_pos)
 
@@ -4049,7 +4060,7 @@ class FKVideoPlayer(QMainWindow):
         delta_frames = int(delta_sec * self.fps)
         self.step_frame(delta_frames)
 
-    def _toggle_loop(self):
+    def _toggle_loop(self, *args):
         self.is_looping = self.btn_loop.isChecked()
 
     def _on_speed_changed(self, text):
@@ -4112,9 +4123,10 @@ class FKVideoPlayer(QMainWindow):
         return f"{mins:02d}:{secs:05.2f}"
 
     def _update_time_label(self):
+        safe_fps = max(1.0, self.fps)
         if self.fps > 0 and self.total_frames > 0:
-            cur_sec = self.current_frame_idx / self.fps
-            tot_sec = self.total_frames / self.fps
+            cur_sec = self.current_frame_idx / safe_fps
+            tot_sec = self.total_frames / safe_fps
             self.lbl_time_info.setText(
                 f"{self._format_time(cur_sec)} / {self._format_time(tot_sec)}  |  Frame: {self.current_frame_idx + 1} / {self.total_frames}  ({self.fps:.1f} FPS)"
             )
@@ -4125,20 +4137,12 @@ class FKVideoPlayer(QMainWindow):
         if hasattr(self, 'overlay_tracks_container') and self.overlay_tracks_container is not None:
             self.overlay_tracks_container.update_positions(cur_sec)
 
-    def closeEvent(self, event):
-        self.play_timer.stop()
-        self.audio_player.stop()
-        self._cleanup_temp_audio()
-        if self.cap is not None:
-            self.cap.release()
-        event.accept()
-
     def _format_rec_time(self, sec: float) -> str:
         mins = int(sec // 60)
         secs = sec % 60
         return f"{mins:02d}:{secs:04.1f}"
 
-    def _toggle_microphone(self):
+    def _toggle_microphone(self, *args):
         self.is_mic_enabled = not self.is_mic_enabled
         if self.is_mic_enabled:
             self.btn_mic_toggle.setText("🎤 Mic: ON")
@@ -4147,7 +4151,7 @@ class FKVideoPlayer(QMainWindow):
             self.btn_mic_toggle.setText("🎤 Mic: OFF")
             self.btn_mic_toggle.setStyleSheet("background-color: #381A1A; color: #FF3B30; border: 1px solid #FF3B30;")
 
-    def start_actions_record(self):
+    def start_actions_record(self, *args):
         if self.recorder.is_active():
             return
         if self.recorder.events:
@@ -4191,7 +4195,7 @@ class FKVideoPlayer(QMainWindow):
         self.lbl_rec_status.setText("● REC 00:00.0 (1 actions)")
         self.rec_update_timer.start(100)
 
-    def pause_actions_record(self):
+    def pause_actions_record(self, *args):
         if not self.recorder.is_active():
             return
         self.recorder.pause()
@@ -4205,7 +4209,7 @@ class FKVideoPlayer(QMainWindow):
             self.btn_rec_pause.setText("❚❚ Pause")
             self.lbl_rec_status.setStyleSheet("color: #FF3B30; font-family: Consolas, monospace; font-weight: bold;")
 
-    def stop_actions_record(self):
+    def stop_actions_record(self, *args):
         if not self.recorder.is_active():
             return
         self.recorder.stop()
@@ -4273,7 +4277,7 @@ class FKVideoPlayer(QMainWindow):
         else:
             self.start_actions_record()
 
-    def export_recorded_video(self):
+    def export_recorded_video(self, *args):
         if not self.recorder.events or self.recorder.elapsed_time <= 0.05:
             QMessageBox.information(self, "Export Video", "No recorded actions to export.")
             return
@@ -4390,7 +4394,7 @@ class FKVideoPlayer(QMainWindow):
         self.canvas.update()
         self._refresh_overlay_tracks()
 
-    def open_new_canvas_dialog(self):
+    def open_new_canvas_dialog(self, *args):
         dlg = NewCanvasDialog(parent=self)
         if dlg.exec_() == 1:
             w, h, bg_hex, fps = dlg.get_settings()
@@ -4426,7 +4430,7 @@ class FKVideoPlayer(QMainWindow):
         ProjectManager.instance().add_project('blank', tab_name, f'{width}x{height}', width, height)
         self._refresh_recent_projects_menu()
 
-    def open_window_capture_dialog(self):
+    def open_window_capture_dialog(self, *args):
         dlg = WindowCaptureDialog(parent=self)
         if dlg.exec_() == 1 and dlg.selected_hwnd:
             self.start_window_capture(dlg.selected_hwnd, dlg.selected_title)
@@ -4505,13 +4509,13 @@ class FKVideoPlayer(QMainWindow):
             self.total_frames = max(self.total_frames, self._capture_frame_count)
             self.recorder.record_frame(force=True)
 
-    def open_preferences_dialog(self):
+    def open_preferences_dialog(self, *args):
         dlg = PreferencesDialog(parent=self)
         dlg.hotkeys_updated.connect(self._setup_shortcuts)
         dlg.language_changed.connect(lambda _: self.update_ui_texts())
         dlg.exec_()
 
-    def open_video_properties_dialog(self):
+    def open_video_properties_dialog(self, *args):
         QMessageBox.information(
             self,
             "Video & Canvas Properties",
@@ -4521,15 +4525,15 @@ class FKVideoPlayer(QMainWindow):
             f"Total Frames: {self.total_frames}"
         )
 
-    def open_export_presets_dialog(self):
+    def open_export_presets_dialog(self, *args):
         dlg = ExportDialog(default_w=self.canvas.video_width, default_h=self.canvas.video_height, parent=self)
         dlg.exec_()
 
-    def open_about_dialog(self):
+    def open_about_dialog(self, *args):
         dlg = AboutDialog(parent=self)
         dlg.exec_()
 
-    def open_updates_dialog(self):
+    def open_updates_dialog(self, *args):
         dlg = UpdatesDialog(parent=self)
         dlg.exec_()
 
@@ -4554,10 +4558,12 @@ class FKVideoPlayer(QMainWindow):
             if ans == QMessageBox.Yes:
                 self.open_updates_dialog()
 
-    def open_donate(self):
-        from settings_dialogs import DONATEPAY_URL
-        import webbrowser
-        webbrowser.open(DONATEPAY_URL)
+    def open_donate(self, *args):
+        try:
+            from settings_dialogs import DONATEPAY_URL, safe_open_url
+            safe_open_url(DONATEPAY_URL)
+        except Exception as e:
+            logger.error(f"Failed to open donate URL: {e}")
 
     def has_unsaved_changes(self) -> bool:
         if self.active_project:
@@ -4602,8 +4608,71 @@ class FKVideoPlayer(QMainWindow):
                 if not self.prompt_unsaved_changes(project=proj):
                     event.ignore()
                     return
+
+        # Stop timers & audio
+        if hasattr(self, 'play_timer') and self.play_timer.isActive():
+            self.play_timer.stop()
+        if hasattr(self, '_audio_sync_timer') and self._audio_sync_timer.isActive():
+            self._audio_sync_timer.stop()
+        if hasattr(self, 'rec_update_timer') and self.rec_update_timer.isActive():
+            self.rec_update_timer.stop()
+        if hasattr(self, 'audio_player'):
+            try:
+                self.audio_player.stop()
+            except Exception:
+                pass
+        self._cleanup_temp_audio()
+
+        # Stop mic & system audio recording
+        if hasattr(self, 'mic_recorder') and getattr(self.mic_recorder, 'is_recording', False):
+            try:
+                self.mic_recorder.stop_recording()
+            except Exception:
+                pass
+        if hasattr(self, 'sys_audio_recorder') and getattr(self.sys_audio_recorder, 'is_recording', False):
+            try:
+                self.sys_audio_recorder.stop_recording()
+            except Exception:
+                pass
+
+        # Stop active export worker if running
+        if hasattr(self, 'export_worker') and self.export_worker is not None:
+            try:
+                self.export_worker.cancel()
+                self.export_worker.wait(1000)
+            except Exception:
+                pass
+            self.export_worker = None
+
+        # Stop active window capture worker if running
+        if hasattr(self, 'window_capture_worker') and self.window_capture_worker is not None:
+            try:
+                self.window_capture_worker.stop()
+                self.window_capture_worker.wait(1000)
+            except Exception:
+                pass
+            self.window_capture_worker = None
+
+        # Stop update worker if running
+        if hasattr(self, '_update_worker') and self._update_worker is not None:
+            try:
+                self._update_worker.quit()
+                self._update_worker.wait(500)
+            except Exception:
+                pass
+            self._update_worker = None
+
+        if hasattr(self, 'cap') and self.cap is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+
         for proj in self.projects:
-            proj.close()
+            try:
+                proj.close()
+            except Exception:
+                pass
 
         # Clean up session temporary audio/video files
         for p in [getattr(self, 'temp_mic_wav_path', None),
@@ -4751,7 +4820,7 @@ class FKVideoPlayer(QMainWindow):
         self.menuBar().clear()
         self._create_menu_bar()
 
-    def save_actions_json(self):
+    def save_actions_json(self, *args):
         if not self.recorder.events:
             QMessageBox.information(self, "Save Actions", "No recorded actions to save.")
             return
@@ -4769,7 +4838,7 @@ class FKVideoPlayer(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save file:\n{e}")
 
-    def load_actions_json(self):
+    def load_actions_json(self, *args):
         load_path, _ = QFileDialog.getOpenFileName(
             self,
             "Load Actions (JSON)",

@@ -26,6 +26,16 @@ from PyQt5.QtWidgets import (
 from i18n import tr, I18nManager
 from capture import list_open_windows
 from audio import get_audio_input_devices, MicLevelMonitor
+from logger import get_logger
+logger = get_logger("Settings")
+
+def safe_open_url(url: str):
+    if not url:
+        return
+    try:
+        webbrowser.open(url)
+    except Exception as e:
+        logger.error(f"Failed to open URL '{url}': {e}")
 
 DIALOG_STYLE = """
 QDialog {
@@ -1336,12 +1346,12 @@ class AboutDialog(QDialog):
         h_contact = QHBoxLayout()
         btn_tg = QPushButton("💬 Telegram: @furrykit")
         btn_tg.setStyleSheet("background-color: #229ED9; color: #FFFFFF; font-weight: bold; border: 1px solid #1E88BD;")
-        btn_tg.clicked.connect(lambda: webbrowser.open(TELEGRAM_URL))
+        btn_tg.clicked.connect(lambda: safe_open_url(TELEGRAM_URL))
         h_contact.addWidget(btn_tg)
 
         btn_gh = QPushButton("🐙 GitHub: furrykit")
         btn_gh.setStyleSheet("background-color: #24292E; color: #FFFFFF; font-weight: bold; border: 1px solid #3F4448;")
-        btn_gh.clicked.connect(lambda: webbrowser.open(GITHUB_URL))
+        btn_gh.clicked.connect(lambda: safe_open_url(GITHUB_URL))
         h_contact.addWidget(btn_gh)
         layout.addLayout(h_contact)
 
@@ -1354,12 +1364,12 @@ class AboutDialog(QDialog):
         h_don = QHBoxLayout()
         btn_dp = QPushButton("DonatePay")
         btn_dp.setObjectName("PrimaryBtn")
-        btn_dp.clicked.connect(lambda: webbrowser.open(DONATEPAY_URL))
+        btn_dp.clicked.connect(lambda: safe_open_url(DONATEPAY_URL))
         h_don.addWidget(btn_dp)
 
         btn_da = QPushButton("DonationAlerts")
         btn_da.setStyleSheet("background-color: #E85D04; color: #FFFFFF; font-weight: bold; border: 1px solid #DC2F02;")
-        btn_da.clicked.connect(lambda: webbrowser.open(DONATIONALERTS_URL))
+        btn_da.clicked.connect(lambda: safe_open_url(DONATIONALERTS_URL))
         h_don.addWidget(btn_da)
         layout.addLayout(h_don)
 
@@ -1406,24 +1416,24 @@ class WelcomeDialog(QDialog):
         btn_dp = QPushButton("💸 DonatePay")
         btn_dp.setObjectName("PrimaryBtn")
         btn_dp.setStyleSheet("font-size: 13px; font-weight: bold; padding: 8px 16px;")
-        btn_dp.clicked.connect(lambda: webbrowser.open(DONATEPAY_URL))
+        btn_dp.clicked.connect(lambda: safe_open_url(DONATEPAY_URL))
         h_don.addWidget(btn_dp)
 
         btn_da = QPushButton("☕ DonationAlerts")
         btn_da.setStyleSheet("background-color: #E85D04; color: #FFFFFF; font-size: 13px; font-weight: bold; border: 1px solid #DC2F02; padding: 8px 16px;")
-        btn_da.clicked.connect(lambda: webbrowser.open(DONATIONALERTS_URL))
+        btn_da.clicked.connect(lambda: safe_open_url(DONATIONALERTS_URL))
         h_don.addWidget(btn_da)
         l_sup.addLayout(h_don)
 
         h_social = QHBoxLayout()
         btn_tg = QPushButton("💬 Telegram: @furrykit")
         btn_tg.setStyleSheet("background-color: #229ED9; color: #FFFFFF; font-weight: bold; border: 1px solid #1E88BD; padding: 6px 12px;")
-        btn_tg.clicked.connect(lambda: webbrowser.open(TELEGRAM_URL))
+        btn_tg.clicked.connect(lambda: safe_open_url(TELEGRAM_URL))
         h_social.addWidget(btn_tg)
 
         btn_gh = QPushButton("🐙 GitHub: furrykit")
         btn_gh.setStyleSheet("background-color: #24292E; color: #FFFFFF; font-weight: bold; border: 1px solid #3F4448; padding: 6px 12px;")
-        btn_gh.clicked.connect(lambda: webbrowser.open(GITHUB_URL))
+        btn_gh.clicked.connect(lambda: safe_open_url(GITHUB_URL))
         h_social.addWidget(btn_gh)
         l_sup.addLayout(h_social)
 
@@ -1623,7 +1633,7 @@ class UpdatesDialog(QDialog):
 
     def _on_download_clicked(self):
         if self._download_url:
-            webbrowser.open(self._download_url)
+            safe_open_url(self._download_url)
 
     def closeEvent(self, event):
         if self._worker and self._worker.isRunning():

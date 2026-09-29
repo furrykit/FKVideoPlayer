@@ -1439,6 +1439,59 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
 
         print("[OK] Context help button removed and tab bar base line disabled")
 
+    def test_47_exception_guards_and_signal_safety(self):
+        """Verify all button handlers accept Qt signal arguments (*args), division guards hold, and closeEvent cleans up"""
+        player = self.player
+
+        # 1. Test Qt signal signatures (buttons passing bool checked=True/False)
+        handlers_to_test = [
+            player.toggle_mute,
+            player._toggle_loop,
+            player._toggle_microphone,
+            player.pause_actions_record,
+            player.stop_actions_record,
+        ]
+        for handler in handlers_to_test:
+            try:
+                handler(True)
+                handler(False)
+            except TypeError as e:
+                self.fail(f"Handler {handler.__name__} failed with Qt signal args: {e}")
+
+        # 2. Test Canvas zoom division guards
+        canvas = player.canvas
+        orig_zoom = canvas.zoom_factor
+        try:
+            canvas.zoom_factor = 0.0
+            pt = canvas.screen_to_video(QPointF(100, 100))
+            self.assertIsNotNone(pt)
+            canvas.apply_zoom_at(1.5, QPointF(50, 50))
+            self.assertGreater(canvas.zoom_factor, 0.0)
+        finally:
+            canvas.zoom_factor = orig_zoom
+
+        # 3. Test FPS division guards
+        orig_fps = player.fps
+        try:
+            player.fps = 0.0
+            player._update_time_label()
+            player._sync_audio_position()
+        finally:
+            player.fps = orig_fps
+
+        # 4. Verify exactly one closeEvent defined in FKVideoPlayer
+        import inspect
+        source = inspect.getsource(type(player))
+        close_events = [line for line in source.splitlines() if line.strip().startswith("def closeEvent(")]
+        self.assertEqual(len(close_events), 1, "FKVideoPlayer must have exactly one unified closeEvent definition")
+
+        # 5. Verify safe_open_url in settings_dialogs handles invalid inputs gracefully
+        from settings_dialogs import safe_open_url
+        safe_open_url("") # Should not raise
+        safe_open_url(None) # Should not raise
+
+        print("[OK] Exception guards, Qt signal safety, and single unified closeEvent verified")
+
 
 if __name__ == "__main__":
     unittest.main()

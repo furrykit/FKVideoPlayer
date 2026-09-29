@@ -135,36 +135,57 @@ def capture_window_frame(hwnd) -> np.ndarray:
             return None
 
         # Align width to multiple of 4 for bitmap stride
-        hwndDC = win32gui.GetWindowDC(hwnd)
-        mfcDC = win32ui.CreateDCFromHandle(hwndDC)
-        saveDC = mfcDC.CreateCompatibleDC()
-        saveBitMap = win32ui.CreateBitmap()
-        saveBitMap.CreateCompatibleBitmap(mfcDC, w, h)
-        saveDC.SelectObject(saveBitMap)
+        hwndDC = None
+        mfcDC = None
+        saveDC = None
+        saveBitMap = None
+        try:
+            hwndDC = win32gui.GetWindowDC(hwnd)
+            mfcDC = win32ui.CreateDCFromHandle(hwndDC)
+            saveDC = mfcDC.CreateCompatibleDC()
+            saveBitMap = win32ui.CreateBitmap()
+            saveBitMap.CreateCompatibleBitmap(mfcDC, w, h)
+            saveDC.SelectObject(saveBitMap)
 
-        # PW_RENDERFULLCONTENT = 2 captures DirectX/hardware accelerated browsers (Chrome, Edge, Firefox, Twitch)
-        PW_RENDERFULLCONTENT = 2
-        res = ctypes.windll.user32.PrintWindow(hwnd, saveDC.GetSafeHdc(), PW_RENDERFULLCONTENT)
-        if not res:
-            res = ctypes.windll.user32.PrintWindow(hwnd, saveDC.GetSafeHdc(), 0)
-        if not res:
-            # Fallback to direct BitBlt
-            saveDC.BitBlt((0, 0), (w, h), mfcDC, (0, 0), win32con.SRCCOPY)
+            # PW_RENDERFULLCONTENT = 2 captures DirectX/hardware accelerated browsers (Chrome, Edge, Firefox, Twitch)
+            PW_RENDERFULLCONTENT = 2
+            res = ctypes.windll.user32.PrintWindow(hwnd, saveDC.GetSafeHdc(), PW_RENDERFULLCONTENT)
+            if not res:
+                res = ctypes.windll.user32.PrintWindow(hwnd, saveDC.GetSafeHdc(), 0)
+            if not res:
+                # Fallback to direct BitBlt
+                saveDC.BitBlt((0, 0), (w, h), mfcDC, (0, 0), win32con.SRCCOPY)
 
-        bmpinfo = saveBitMap.GetInfo()
-        bmpstr = saveBitMap.GetBitmapBits(True)
+            bmpinfo = saveBitMap.GetInfo()
+            bmpstr = saveBitMap.GetBitmapBits(True)
 
-        # Cleanup GDI handles immediately to prevent leaks
-        win32gui.DeleteObject(saveBitMap.GetHandle())
-        saveDC.DeleteDC()
-        mfcDC.DeleteDC()
-        win32gui.ReleaseDC(hwnd, hwndDC)
-
-        # Convert buffer to numpy array BGRA -> BGR
-        raw_w, raw_h = bmpinfo['bmWidth'], bmpinfo['bmHeight']
-        img_np = np.frombuffer(bmpstr, dtype=np.uint8).reshape((raw_h, raw_w, 4))
-        bgr = img_np[:, :, :3].copy()
-        return bgr
+            # Convert buffer to numpy array BGRA -> BGR
+            raw_w, raw_h = bmpinfo['bmWidth'], bmpinfo['bmHeight']
+            img_np = np.frombuffer(bmpstr, dtype=np.uint8).reshape((raw_h, raw_w, 4))
+            bgr = img_np[:, :, :3].copy()
+            return bgr
+        finally:
+            # Cleanup GDI handles reliably in finally block to prevent memory/handle leaks
+            if saveBitMap is not None:
+                try:
+                    win32gui.DeleteObject(saveBitMap.GetHandle())
+                except Exception:
+                    pass
+            if saveDC is not None:
+                try:
+                    saveDC.DeleteDC()
+                except Exception:
+                    pass
+            if mfcDC is not None:
+                try:
+                    mfcDC.DeleteDC()
+                except Exception:
+                    pass
+            if hwndDC is not None:
+                try:
+                    win32gui.ReleaseDC(hwnd, hwndDC)
+                except Exception:
+                    pass
 
     except Exception:
         return None
@@ -188,27 +209,33 @@ class WindowCaptureWorker(QThread):
 
     def run(self):
         import time
-        ensure_interactive_station()
-        interval = 1.0 / self.target_fps
-        t_start = time.perf_counter()
+        try:
+            ensure_interactive_station()
+            interval = 1.0 / max(1.0, self.target_fps)
+            t_start = time.perf_counter()
 
-        while True:
-            self.mutex.lock()
-            running = self.is_running
-            self.mutex.unlock()
-            if not running:
-                break
+            while True:
+                self.mutex.lock()
+                running = self.is_running
+                self.mutex.unlock()
+                if not running:
+                    break
 
-            t0 = time.perf_counter()
-            frame = capture_window_frame(self.hwnd)
-            cur_time = time.perf_counter() - t_start
+                t0 = time.perf_counter()
+                try:
+                    frame = capture_window_frame(self.hwnd)
+                except Exception:
+                    frame = None
+                cur_time = time.perf_counter() - t_start
 
-            if frame is not None:
-                self.frame_captured.emit(frame, cur_time)
+                if frame is not None:
+                    self.frame_captured.emit(frame, cur_time)
 
-            elapsed = time.perf_counter() - t0
-            sleep_time = interval - elapsed
-            if sleep_time > 0.001:
-                time.sleep(sleep_time)
-
-        self.stopped.emit()
+                elapsed = time.perf_counter() - t0
+                sleep_time = interval - elapsed
+                if sleep_time > 0.001:
+                    time.sleep(sleep_time)
+        except Exception:
+            pass
+        finally:
+            self.stopped.emit()
