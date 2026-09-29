@@ -1337,6 +1337,38 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
 
         print("[OK] Dynamic eraser size and Photoshop-style stroke carving verified")
 
+    def test_44_add_overlay_button_and_logger(self):
+        """Verify Add Overlay button does not crash with bool signal argument and verify logging"""
+        import logger
+        from PyQt5.QtWidgets import QFileDialog
+
+        # 1. Test clicking btn_add_overlay
+        icon_path = os.path.abspath("icon.ico")
+        orig_get_open = QFileDialog.getOpenFileName
+        try:
+            QFileDialog.getOpenFileName = lambda *args, **kwargs: (icon_path, "All Files (*.*)")
+            prev_count = len(self.player.canvas.overlays)
+            # Emits clicked(bool checked=False)
+            self.player.btn_add_overlay.click()
+            self.assertEqual(len(self.player.canvas.overlays), prev_count + 1)
+
+            # Test calling add_overlay_dialog directly with False
+            self.player.add_overlay_dialog(False)
+            self.assertEqual(len(self.player.canvas.overlays), prev_count + 2)
+        finally:
+            QFileDialog.getOpenFileName = orig_get_open
+
+        # 2. Test logger system
+        log = logger.get_logger("Test")
+        log.info("Test entry from test_44")
+        log_path = logger.get_log_file_path()
+        self.assertTrue(os.path.exists(log_path))
+        with open(log_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            self.assertIn("Test entry from test_44", content)
+
+        print("[OK] Add overlay button crash fix and logging subsystem verified")
+
 
 if __name__ == "__main__":
     unittest.main()

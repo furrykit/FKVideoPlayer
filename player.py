@@ -34,6 +34,9 @@ from settings_dialogs import (
     DEFAULT_HOTKEYS, HOTKEYS_CONFIG_PATH
 )
 
+from logger import init_logging, get_logger, open_log_file, open_logs_folder
+logger = get_logger("Player")
+
 
 def set_dark_titlebar(window):
     """Enable native dark titlebar and caption color on Windows 10/11"""
@@ -3131,7 +3134,7 @@ class FKVideoPlayer(QMainWindow):
 
         self.btn_add_overlay = QPushButton("🖼️ Add Overlay...")
         self.btn_add_overlay.setToolTip("Add image, GIF, or secondary video overlay (Ctrl+I)")
-        self.btn_add_overlay.clicked.connect(self.add_overlay_dialog)
+        self.btn_add_overlay.clicked.connect(lambda: self.add_overlay_dialog(None))
         layout.addWidget(self.btn_add_overlay)
 
         self._add_separator(layout)
@@ -3558,8 +3561,10 @@ class FKVideoPlayer(QMainWindow):
 
     def add_overlay(self, file_path: str, pos: QPointF = None):
         if not file_path or not os.path.exists(file_path):
+            logger.warning(f"add_overlay called with nonexistent file: {file_path}")
             return
 
+        logger.info(f"Adding overlay from {file_path}")
         vw = self.canvas.video_width if self.canvas.video_width > 0 else 1280
         vh = self.canvas.video_height if self.canvas.video_height > 0 else 720
 
@@ -3571,8 +3576,8 @@ class FKVideoPlayer(QMainWindow):
                 with Image.open(file_path) as im:
                     if im.width > 0 and im.height > 0:
                         oh = ow * (im.height / float(im.width))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to read image dimensions for {file_path}: {e}")
         elif ext in ('.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.m4v'):
             try:
                 temp_cap = cv2.VideoCapture(file_path)
@@ -3582,10 +3587,10 @@ class FKVideoPlayer(QMainWindow):
                     if cw > 0 and ch > 0:
                         oh = ow * (ch / float(cw))
                 temp_cap.release()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to read video dimensions for {file_path}: {e}")
 
-        if pos is not None:
+        if isinstance(pos, (QPointF, QPoint)):
             ox = max(5.0, min(vw - 25.0, pos.x() - ow / 2.0))
             oy = max(5.0, min(vh - 25.0, pos.y() - oh / 2.0))
         else:
@@ -3605,8 +3610,11 @@ class FKVideoPlayer(QMainWindow):
         self._select_tool(VideoCanvas.TOOL_SELECT)
         self._refresh_overlay_tracks()
         self.canvas.update()
+        logger.info(f"Overlay created: sid={sid}, rect=({ox:.1f}, {oy:.1f}, {ow:.1f}, {oh:.1f})")
 
     def add_overlay_dialog(self, pos: QPointF = None):
+        if not isinstance(pos, (QPointF, QPoint)):
+            pos = None
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select Image, GIF, or Video Overlay",
@@ -3754,6 +3762,7 @@ class FKVideoPlayer(QMainWindow):
 
         self.cap = cv2.VideoCapture(file_path)
         if not self.cap.isOpened():
+            logger.error(f"Failed to open video file with OpenCV: {file_path}")
             QMessageBox.critical(self, "Error", f"Failed to open video file:\n{file_path}")
             return
 
@@ -3762,6 +3771,7 @@ class FKVideoPlayer(QMainWindow):
         self.fps = float(self.cap.get(cv2.CAP_PROP_FPS))
         if self.fps <= 1.0 or np.isnan(self.fps):
             self.fps = 25.0
+        logger.info(f"Loaded video: {file_path} (frames={self.total_frames}, fps={self.fps:.2f})")
 
         self.frame_cache.clear()
         self._cap_pos = 0
@@ -4334,12 +4344,12 @@ class FKVideoPlayer(QMainWindow):
         tw = max(180.0, vw * 0.35)
         th = max(60.0, vh * 0.12)
 
-        if pos is None:
-            tx = (vw - tw) * 0.5
-            ty = (vh - th) * 0.5
-        else:
+        if isinstance(pos, (QPointF, QPoint)):
             tx = max(0.0, min(pos.x(), vw - tw))
             ty = max(0.0, min(pos.y(), vh - th))
+        else:
+            tx = (vw - tw) * 0.5
+            ty = (vh - th) * 0.5
 
         rect = QRectF(tx, ty, tw, th)
         sid = self.recorder.allocate_stroke_id()
@@ -4659,6 +4669,9 @@ class FKVideoPlayer(QMainWindow):
         self.menu_help = menubar.addMenu(tr('menu_help'))
         self.menu_help.addAction(tr('act_about'), self.open_about_dialog, QKeySequence("F1"))
         self.menu_help.addAction(tr('act_updates'), self.open_updates_dialog)
+        self.menu_help.addSeparator()
+        self.menu_help.addAction(tr('act_open_log_file'), open_log_file)
+        self.menu_help.addAction(tr('act_open_logs_folder'), open_logs_folder)
 
     def _refresh_recent_projects_menu(self):
         if not hasattr(self, 'menu_recent'):
@@ -4986,6 +4999,8 @@ VideoPlayerWindow = FKVideoPlayer
 
 
 def main():
+    init_logging()
+    logger.info("Initializing QApplication")
     app = QApplication(sys.argv)
     icon_path = resource_path("icon.ico")
     if os.path.exists(icon_path):
@@ -4994,10 +5009,14 @@ def main():
     initial_file = None
     if len(sys.argv) > 1 and os.path.exists(sys.argv[1]):
         initial_file = sys.argv[1]
+        logger.info(f"Opening with initial file argument: {initial_file}")
 
     player = FKVideoPlayer(initial_file)
     player.show()
-    sys.exit(app.exec_())
+    logger.info("FKVideoPlayer main window displayed")
+    ret = app.exec_()
+    logger.info(f"FKVideoPlayer exiting with code {ret}")
+    sys.exit(ret)
 
 
 if __name__ == "__main__":
