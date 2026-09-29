@@ -4775,6 +4775,10 @@ class FKVideoPlayer(QMainWindow):
                 background-color: #0E0E14;
                 border-radius: 4px;
             }
+            QTabBar {
+                background: transparent;
+                qproperty-drawBase: 0;
+            }
             QTabBar::tab {
                 background-color: #161622;
                 color: #A0A0B8;
@@ -5006,6 +5010,8 @@ def main():
         QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     if hasattr(Qt, 'AA_UseHighDpiPixmaps'):
         QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    if hasattr(Qt, 'AA_DisableWindowContextHelpButton'):
+        QApplication.setAttribute(Qt.AA_DisableWindowContextHelpButton, True)
 
     logger.info("Initializing QApplication")
     app = QApplication(sys.argv)

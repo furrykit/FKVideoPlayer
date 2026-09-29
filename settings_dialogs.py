@@ -152,10 +152,17 @@ QTabWidget::pane {
     background-color: #1C1C26;
     padding: 10px;
 }
+QTabBar {
+    background: transparent;
+    qproperty-drawBase: 0;
+    border: none;
+}
 QTabBar::tab {
     background: #222230;
     color: #A0A0B8;
-    padding: 6px 14px;
+    border: 1px solid #282838;
+    border-bottom: none;
+    padding: 6px 16px;
     font-size: 12px;
     border-top-left-radius: 6px;
     border-top-right-radius: 6px;
@@ -165,6 +172,7 @@ QTabBar::tab:selected {
     background: #2E2E40;
     color: #FFFFFF;
     font-weight: bold;
+    border: 1px solid #007AFF;
     border-bottom: 2px solid #007AFF;
 }
 """
@@ -209,6 +217,8 @@ class AutoAdjustTabBar(QTabBar):
 class NewCanvasDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+        if hasattr(Qt, 'WindowContextHelpButtonHint'):
+            self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setWindowTitle(tr('dlg_new_canvas_title'))
         self.setStyleSheet(DIALOG_STYLE)
         self.resize(450, 380)
@@ -313,6 +323,8 @@ class NewCanvasDialog(QDialog):
 class WindowCaptureDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+        if hasattr(Qt, 'WindowContextHelpButtonHint'):
+            self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setWindowTitle(tr('dlg_capture_title'))
         self.setStyleSheet(DIALOG_STYLE)
         self.resize(600, 420)
@@ -395,6 +407,8 @@ class WindowCaptureDialog(QDialog):
 class TextOverlayDialog(QDialog):
     def __init__(self, initial_text="Sample Text", initial_font=None, initial_color="#FFFFFF", initial_bg="transparent", parent=None):
         super().__init__(parent)
+        if hasattr(Qt, 'WindowContextHelpButtonHint'):
+            self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setWindowTitle(tr('dlg_text_title'))
         self.setStyleSheet(DIALOG_STYLE)
         self.resize(480, 400)
@@ -541,6 +555,8 @@ DEFAULT_EXPORT_PRESETS = {
 class ExportDialog(QDialog):
     def __init__(self, default_w=1920, default_h=1080, has_audio=False, parent=None):
         super().__init__(parent)
+        if hasattr(Qt, 'WindowContextHelpButtonHint'):
+            self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setWindowTitle(tr('dlg_export_title'))
         self.setStyleSheet(DIALOG_STYLE)
         self.resize(580, 590)
@@ -885,6 +901,8 @@ class PreferencesDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        if hasattr(Qt, 'WindowContextHelpButtonHint'):
+            self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setWindowTitle(tr('dlg_prefs_title'))
         self.setStyleSheet(DIALOG_STYLE)
         self.resize(680, 540)
@@ -1061,6 +1079,8 @@ class PreferencesDialog(QDialog):
 class VideoOverlaySettingsDialog(QDialog):
     def __init__(self, overlay, parent=None):
         super().__init__(parent)
+        if hasattr(Qt, 'WindowContextHelpButtonHint'):
+            self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.overlay = overlay
         self.setWindowTitle(tr('dlg_overlay_video_title'))
         self.setStyleSheet(DIALOG_STYLE)
@@ -1276,6 +1296,8 @@ GITHUB_URL = "https://github.com/furrykit"
 class AboutDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+        if hasattr(Qt, 'WindowContextHelpButtonHint'):
+            self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setWindowTitle(tr('dlg_about_title'))
         self.setStyleSheet(DIALOG_STYLE)
         self.resize(520, 440)
@@ -1354,6 +1376,8 @@ class AboutDialog(QDialog):
 class WelcomeDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+        if hasattr(Qt, 'WindowContextHelpButtonHint'):
+            self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setWindowTitle(tr('welcome_title'))
         self.setStyleSheet(DIALOG_STYLE)
         self.resize(560, 480)
@@ -1509,6 +1533,8 @@ class GitHubUpdateCheckerWorker(QThread):
 class UpdatesDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+        if hasattr(Qt, 'WindowContextHelpButtonHint'):
+            self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setWindowTitle(tr('dlg_updates_title'))
         self.setStyleSheet(DIALOG_STYLE)
         self.resize(540, 400)
@@ -1598,4 +1624,19 @@ class UpdatesDialog(QDialog):
     def _on_download_clicked(self):
         if self._download_url:
             webbrowser.open(self._download_url)
+
+    def closeEvent(self, event):
+        if self._worker and self._worker.isRunning():
+            self._worker.quit()
+            self._worker.wait(500)
+        super().closeEvent(event)
+
+    def __del__(self):
+        try:
+            if hasattr(self, '_worker') and self._worker and self._worker.isRunning():
+                self._worker.quit()
+                self._worker.wait(500)
+        except Exception:
+            pass
+
 

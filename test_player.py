@@ -1402,8 +1402,39 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
 
         print("[OK] Tab bar and button adaptive sizing verified: zero clipping in any language")
 
+    def test_46_no_help_button_and_clean_tabbar_style(self):
+        """Verify context help question mark is stripped and tab bar base line is disabled"""
+        from settings_dialogs import (
+            PreferencesDialog, NewCanvasDialog, WindowCaptureDialog,
+            TextOverlayDialog, ExportDialog, AboutDialog, WelcomeDialog,
+            UpdatesDialog, DIALOG_STYLE
+        )
+
+        # 1. Verify DIALOG_STYLE disables drawBase
+        self.assertIn("qproperty-drawBase: 0", DIALOG_STYLE)
+        self.assertIn("border: 1px solid #282838", DIALOG_STYLE)
+
+        # 2. Verify all dialogs strip WindowContextHelpButtonHint
+        dialog_classes = [
+            PreferencesDialog, NewCanvasDialog, WindowCaptureDialog,
+            TextOverlayDialog, ExportDialog, AboutDialog, WelcomeDialog,
+            UpdatesDialog
+        ]
+        for dlg_cls in dialog_classes:
+            dlg = dlg_cls()
+            flags = int(dlg.windowFlags())
+            self.assertEqual(
+                flags & int(Qt.WindowContextHelpButtonHint),
+                0,
+                f"{dlg_cls.__name__} must not have WindowContextHelpButtonHint"
+            )
+            dlg.close()
+
+        print("[OK] Context help button removed and tab bar base line disabled")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
