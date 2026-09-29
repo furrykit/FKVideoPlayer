@@ -1397,7 +1397,7 @@ class WelcomeDialog(QDialog):
 # 7. Updates Dialog & Real GitHub Release Checker
 # =========================================================================
 DEFAULT_REPO_URL = "https://github.com/furrykit/FKVideoPlayer"
-CURRENT_VERSION = "1.1.0"
+CURRENT_VERSION = "1.1.1"
 
 
 def parse_version(v_str: str) -> tuple:
