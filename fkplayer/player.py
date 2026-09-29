@@ -2940,7 +2940,7 @@ class FKVideoPlayer(QMainWindow):
                 QTimer.singleShot(250, self.open_welcome_dialog)
 
     def open_welcome_dialog(self, *args):
-        from settings_dialogs import WelcomeDialog
+        from fkplayer.ui.dialogs import WelcomeDialog
         dlg = WelcomeDialog(parent=self)
         dlg.exec_()
 
@@ -4601,7 +4601,7 @@ class FKVideoPlayer(QMainWindow):
 
     def _check_updates_background(self):
         try:
-            from settings_dialogs import GitHubUpdateCheckerWorker
+            from fkplayer.ui.dialogs import GitHubUpdateCheckerWorker
             self._update_worker = GitHubUpdateCheckerWorker(current_version=APP_VERSION, parent=self)
             self._update_worker.finished.connect(self._on_update_check_bg_finished)
             self._update_worker.start()
@@ -4622,7 +4622,7 @@ class FKVideoPlayer(QMainWindow):
 
     def open_donate(self, *args):
         try:
-            from settings_dialogs import DONATEPAY_URL, safe_open_url
+            from fkplayer.ui.dialogs import DONATEPAY_URL, safe_open_url
             safe_open_url(DONATEPAY_URL)
         except Exception as e:
             logger.error(f"Failed to open donate URL: {e}")
@@ -4718,8 +4718,11 @@ class FKVideoPlayer(QMainWindow):
         # Stop update worker if running
         if hasattr(self, '_update_worker') and self._update_worker is not None:
             try:
-                self._update_worker.quit()
-                self._update_worker.wait(500)
+                if self._update_worker.isRunning():
+                    self._update_worker.quit()
+                    if not self._update_worker.wait(300):
+                        self._update_worker.terminate()
+                        self._update_worker.wait(300)
             except Exception:
                 pass
             self._update_worker = None

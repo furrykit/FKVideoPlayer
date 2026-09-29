@@ -24,15 +24,15 @@ from PyQt5.QtWidgets import (
 )
 
 try:
+    from fkplayer.core.i18n import tr, I18nManager
+    from fkplayer.media.capture import list_open_windows
+    from fkplayer.media.audio import get_audio_input_devices, MicLevelMonitor
+    from fkplayer.core.logger import get_logger
+except (ImportError, ValueError):
     from ...core.i18n import tr, I18nManager
     from ...media.capture import list_open_windows
     from ...media.audio import get_audio_input_devices, MicLevelMonitor
     from ...core.logger import get_logger
-except (ImportError, ValueError):
-    from i18n import tr, I18nManager
-    from capture import list_open_windows
-    from audio import get_audio_input_devices, MicLevelMonitor
-    from logger import get_logger
 
 logger = get_logger("Settings")
 
@@ -1645,14 +1645,18 @@ class UpdatesDialog(QDialog):
     def closeEvent(self, event):
         if self._worker and self._worker.isRunning():
             self._worker.quit()
-            self._worker.wait(500)
+            if not self._worker.wait(300):
+                self._worker.terminate()
+                self._worker.wait(300)
         super().closeEvent(event)
 
     def __del__(self):
         try:
             if hasattr(self, '_worker') and self._worker and self._worker.isRunning():
                 self._worker.quit()
-                self._worker.wait(500)
+                if not self._worker.wait(300):
+                    self._worker.terminate()
+                    self._worker.wait(300)
         except Exception:
             pass
 
