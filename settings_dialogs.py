@@ -481,25 +481,25 @@ PRESETS_FILE = os.path.join(os.path.expanduser('~'), '.fk_export_presets.json')
 
 DEFAULT_EXPORT_PRESETS = {
     "YouTube 1080p 60fps (x264)": {
-        "codec": "libx264", "format": "mp4", "width": 1920, "height": 1080, "fps": 60, "bitrate": "12M", "rate_control": "vbr"
+        "codec": "libx264", "format": "mp4", "width": 1920, "height": 1080, "fps": 60, "bitrate": "12000k", "rate_control": "vbr"
     },
     "Twitch / Stream Highlight (1080p 30fps)": {
-        "codec": "libx264", "format": "mp4", "width": 1920, "height": 1080, "fps": 30, "bitrate": "8M", "rate_control": "cbr"
+        "codec": "libx264", "format": "mp4", "width": 1920, "height": 1080, "fps": 30, "bitrate": "8000k", "rate_control": "cbr"
     },
     "TikTok / Shorts (1080x1920 Vertical)": {
-        "codec": "libx264", "format": "mp4", "width": 1080, "height": 1920, "fps": 30, "bitrate": "10M", "rate_control": "vbr"
+        "codec": "libx264", "format": "mp4", "width": 1080, "height": 1920, "fps": 30, "bitrate": "10000k", "rate_control": "vbr"
     },
     "Ultra Quality Archive (HEVC H.265 4K)": {
-        "codec": "libx265", "format": "mp4", "width": 3840, "height": 2160, "fps": 60, "bitrate": "25M", "rate_control": "vbr"
+        "codec": "libx265", "format": "mp4", "width": 3840, "height": 2160, "fps": 60, "bitrate": "25000k", "rate_control": "vbr"
     },
     "Fast / Draft (720p 30fps)": {
-        "codec": "libx264", "format": "mp4", "width": 1280, "height": 720, "fps": 30, "bitrate": "4M", "rate_control": "vbr"
+        "codec": "libx264", "format": "mp4", "width": 1280, "height": 720, "fps": 30, "bitrate": "4000k", "rate_control": "vbr"
     },
     "Apple ProRes High-Fidelity": {
-        "codec": "prores_ks", "format": "mov", "width": 1920, "height": 1080, "fps": 30, "bitrate": "50M", "rate_control": "vbr"
+        "codec": "prores_ks", "format": "mov", "width": 1920, "height": 1080, "fps": 30, "bitrate": "50000k", "rate_control": "vbr"
     },
     "Custom (User Defined)": {
-        "codec": "libx264", "format": "mp4", "width": 1920, "height": 1080, "fps": 30, "bitrate": "10M", "rate_control": "vbr"
+        "codec": "libx264", "format": "mp4", "width": 1920, "height": 1080, "fps": 30, "bitrate": "10000k", "rate_control": "vbr"
     }
 }
 
@@ -576,28 +576,33 @@ class ExportDialog(QDialog):
         h_rc.addWidget(self.spin_fps)
         layout.addLayout(h_rc)
 
-        # Bitrate & Custom Bitrate SpinBox
+        # Bitrate preset combo
         h_bf = QHBoxLayout()
         h_bf.addWidget(QLabel(tr('dlg_export_bitrate')))
         self.combo_bitrate = QComboBox()
-        self.combo_bitrate.addItem("4 Mbps (Draft)", 4.0)
-        self.combo_bitrate.addItem("8 Mbps (Standard HD)", 8.0)
-        self.combo_bitrate.addItem("12 Mbps (High 1080p)", 12.0)
-        self.combo_bitrate.addItem("20 Mbps (Ultra HD)", 20.0)
-        self.combo_bitrate.addItem("50 Mbps (Master Quality)", 50.0)
-        self.combo_bitrate.addItem(tr('dlg_bitrate_custom'), -1.0)
+        self.combo_bitrate.addItem("4,000 kbps (Draft)", 4000)
+        self.combo_bitrate.addItem("8,000 kbps (Standard HD)", 8000)
+        self.combo_bitrate.addItem("12,000 kbps (High 1080p)", 12000)
+        self.combo_bitrate.addItem("20,000 kbps (Ultra HD)", 20000)
+        self.combo_bitrate.addItem("50,000 kbps (Master Quality)", 50000)
+        self.combo_bitrate.addItem(tr('dlg_bitrate_custom'), -1)
         self.combo_bitrate.setCurrentIndex(2)
         h_bf.addWidget(self.combo_bitrate)
-
-        h_bf.addWidget(QLabel(tr('dlg_export_custom_bitrate')))
-        self.spin_bitrate = QDoubleSpinBox()
-        self.spin_bitrate.setRange(0.1, 300.0)
-        self.spin_bitrate.setSingleStep(0.5)
-        self.spin_bitrate.setDecimals(1)
-        self.spin_bitrate.setValue(12.0)
-        self.spin_bitrate.setSuffix(" Mbps")
-        h_bf.addWidget(self.spin_bitrate)
         layout.addLayout(h_bf)
+
+        # Custom Bitrate SpinBox row (ONLY visible if Custom is chosen!)
+        self.row_custom_bitrate = QWidget()
+        h_cb = QHBoxLayout(self.row_custom_bitrate)
+        h_cb.setContentsMargins(0, 0, 0, 0)
+        h_cb.addWidget(QLabel(tr('dlg_export_custom_bitrate')))
+        self.spin_bitrate = QSpinBox()
+        self.spin_bitrate.setRange(250, 300000)
+        self.spin_bitrate.setSingleStep(500)
+        self.spin_bitrate.setValue(12000)
+        self.spin_bitrate.setSuffix(" kbps")
+        h_cb.addWidget(self.spin_bitrate)
+        layout.addWidget(self.row_custom_bitrate)
+        self.row_custom_bitrate.setVisible(False)
 
         # Audio checkbox
         self.check_audio = QCheckBox(tr('dlg_export_audio'))
@@ -693,33 +698,22 @@ class ExportDialog(QDialog):
 
     def _on_bitrate_combo_changed(self):
         val = self.combo_bitrate.currentData()
-        if val is not None and float(val) > 0:
+        is_custom = (val == -1 or val is None)
+        self.row_custom_bitrate.setVisible(is_custom)
+        if not is_custom and val is not None and int(val) > 0:
             self._syncing_bitrate = True
-            self.spin_bitrate.setValue(float(val))
+            self.spin_bitrate.setValue(int(val))
             self._syncing_bitrate = False
         self._on_param_changed()
 
     def _on_bitrate_spin_changed(self):
-        if not getattr(self, '_syncing_bitrate', False):
-            val = self.spin_bitrate.value()
-            matched = False
-            for i in range(self.combo_bitrate.count() - 1):
-                d = self.combo_bitrate.itemData(i)
-                if d is not None and abs(float(d) - val) < 0.05:
-                    self.combo_bitrate.blockSignals(True)
-                    self.combo_bitrate.setCurrentIndex(i)
-                    self.combo_bitrate.blockSignals(False)
-                    matched = True
-                    break
-            if not matched:
-                self.combo_bitrate.blockSignals(True)
-                self.combo_bitrate.setCurrentIndex(self.combo_bitrate.count() - 1)
-                self.combo_bitrate.blockSignals(False)
         self._on_param_changed()
 
     def _get_bitrate_str(self):
-        val = self.spin_bitrate.value()
-        return f"{val:.1f}".rstrip('0').rstrip('.') + "M"
+        val = self.combo_bitrate.currentData()
+        if val is not None and int(val) > 0:
+            return f"{int(val)}k"
+        return f"{self.spin_bitrate.value()}k"
 
     def _save_custom_preset(self):
         from PyQt5.QtWidgets import QInputDialog
@@ -767,28 +761,30 @@ class ExportDialog(QDialog):
             if idx_rc >= 0:
                 self.combo_rate_control.setCurrentIndex(idx_rc)
 
-            b_raw = str(p.get('bitrate', '12M')).upper().strip()
+            b_raw = str(p.get('bitrate', '12000k')).upper().strip()
             try:
                 if b_raw.endswith('M'):
-                    b_num = float(b_raw[:-1])
+                    b_num = int(float(b_raw[:-1]) * 1000)
                 elif b_raw.endswith('K'):
-                    b_num = float(b_raw[:-1]) / 1000.0
+                    b_num = int(float(b_raw[:-1]))
                 else:
-                    b_num = float(b_raw) / 1000000.0
+                    b_num = int(float(b_raw) / 1000)
             except Exception:
-                b_num = 12.0
+                b_num = 12000
 
             self._syncing_bitrate = True
             self.spin_bitrate.setValue(b_num)
             matched = False
             for i in range(self.combo_bitrate.count() - 1):
                 d = self.combo_bitrate.itemData(i)
-                if d is not None and abs(float(d) - b_num) < 0.05:
+                if d is not None and abs(int(d) - b_num) < 10:
                     self.combo_bitrate.setCurrentIndex(i)
+                    self.row_custom_bitrate.setVisible(False)
                     matched = True
                     break
             if not matched:
                 self.combo_bitrate.setCurrentIndex(self.combo_bitrate.count() - 1)
+                self.row_custom_bitrate.setVisible(True)
             self._syncing_bitrate = False
         finally:
             self._updating_preset = False
