@@ -96,7 +96,9 @@ python player.py
 ### Running Tests
 All 47 unit and integration tests run offline without external dependencies:
 ```bash
-python -m unittest test_player.py
+python -m unittest discover tests
+# or
+python -m unittest tests/test_player.py
 ```
 
 ### Building Portable Executable

@@ -96,7 +96,9 @@ python player.py
 ### Запуск тестов
 Все 47 автотестов работают локально без внешних зависимостей:
 ```bash
-python -m unittest test_player.py
+python -m unittest discover tests
+# или
+python -m unittest tests/test_player.py
 ```
 
 ### Сборка автономного EXE

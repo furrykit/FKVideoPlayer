@@ -8,5 +8,5 @@ __pycache__/
 *.wav
 build/
 dist/
-*.spec
+!FKVideoPlayer.spec
 generate_pretty_icon.py

@@ -22,15 +22,21 @@ from PyQt5.QtWidgets import QApplication
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
-from player import (
+# Ensure repo root is on sys.path
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from fkplayer.player import (
     VideoPlayerWindow, VideoCanvas, Stroke, dist_to_segment_sq,
-    ActionRecorder, ExportVideoWorker, OverlayObject, set_dark_titlebar
+    ActionRecorder, ExportVideoWorker, OverlayObject, set_dark_titlebar,
+    resource_path
 )
-from i18n import tr, I18nManager
-from capture import list_open_windows, capture_window_frame
-from audio import MicrophoneRecorder, get_audio_input_devices, MicLevelMonitor
-from projects import ProjectManager
-from settings_dialogs import (
+from fkplayer.core.i18n import tr, I18nManager
+from fkplayer.media.capture import list_open_windows, capture_window_frame
+from fkplayer.media.audio import MicrophoneRecorder, get_audio_input_devices, MicLevelMonitor
+from fkplayer.core.projects import ProjectManager
+from fkplayer.ui.dialogs import (
     NewCanvasDialog, ExportDialog, PreferencesDialog, DEFAULT_EXPORT_PRESETS,
     VideoOverlaySettingsDialog, AboutDialog, DONATEPAY_URL, DONATIONALERTS_URL,
     TELEGRAM_URL, GITHUB_URL
@@ -506,7 +512,7 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
 
         self.player.start_actions_record()
 
-        img_path = os.path.abspath("icon.png")
+        img_path = resource_path("icon.png")
         self.assertTrue(os.path.exists(img_path))
         ov_img = OverlayObject(1, img_path, QRectF(20, 20, 100, 100), start_time=0.0)
         self.assertEqual(ov_img.obj_type, OverlayObject.TYPE_IMAGE)
@@ -567,7 +573,7 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         """Verify drag and drop files onto canvas creates overlays at drop location"""
         canvas = self.player.canvas
         canvas.overlays.clear()
-        img_path = os.path.abspath("icon.png")
+        img_path = resource_path("icon.png")
         self.assertTrue(os.path.exists(img_path))
 
         mime = QMimeData()
@@ -589,7 +595,7 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         """Verify layer stacking (bring to front/send to back/forward/backward) and duplicate"""
         canvas = self.player.canvas
         canvas.overlays.clear()
-        img_path = os.path.abspath("icon.png")
+        img_path = resource_path("icon.png")
 
         ov1 = OverlayObject(1, img_path, QRectF(10, 10, 50, 50))
         ov2 = OverlayObject(2, img_path, QRectF(60, 10, 50, 50))
@@ -633,7 +639,7 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         """Verify corner resize handles, delete handle, and aspect ratio calculations"""
         canvas = self.player.canvas
         canvas.overlays.clear()
-        img_path = os.path.abspath("icon.png")
+        img_path = resource_path("icon.png")
         ov = OverlayObject(1, img_path, QRectF(100, 100, 200, 100))
         canvas.overlays.append(ov)
         canvas.selected_overlay = ov
@@ -1102,7 +1108,7 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
             QMessageBox.question = old_question
 
     def test_39_welcome_dialog_and_clean_ui(self):
-        from settings_dialogs import AboutDialog, WelcomeDialog
+        from fkplayer.ui.dialogs import AboutDialog, WelcomeDialog
         from PyQt5.QtWidgets import QLabel
 
         # 1. Verify AboutDialog author is not duplicated
@@ -1211,7 +1217,7 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         self.assertGreater(track_row.dur, 0.0)
 
         # 6. Verify SystemAudioRecorder existence
-        from audio import SystemAudioRecorder
+        from fkplayer.media.audio import SystemAudioRecorder
         sys_rec = SystemAudioRecorder()
         self.assertIsNotNone(sys_rec)
 
@@ -1229,8 +1235,8 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
 
     def test_41_ffmpeg_and_updater(self):
         """Verify get_ffmpeg_path and UpdatesDialog / GitHubUpdateCheckerWorker"""
-        from player import get_ffmpeg_path, APP_VERSION
-        from settings_dialogs import UpdatesDialog, GitHubUpdateCheckerWorker, parse_version
+        from fkplayer.player import get_ffmpeg_path, APP_VERSION
+        from fkplayer.ui.dialogs import UpdatesDialog, GitHubUpdateCheckerWorker, parse_version
 
         # 1. Verify get_ffmpeg_path finds local ffmpeg
         ffmpeg_exe = get_ffmpeg_path()
@@ -1346,11 +1352,12 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
 
     def test_44_add_overlay_button_and_logger(self):
         """Verify Add Overlay button does not crash with bool signal argument and verify logging"""
-        import logger
+        from fkplayer.core import logger
+        from fkplayer.player import resource_path
         from PyQt5.QtWidgets import QFileDialog
 
         # 1. Test clicking btn_add_overlay
-        icon_path = os.path.abspath("icon.ico")
+        icon_path = resource_path("icon.ico")
         orig_get_open = QFileDialog.getOpenFileName
         try:
             QFileDialog.getOpenFileName = lambda *args, **kwargs: (icon_path, "All Files (*.*)")
@@ -1378,8 +1385,8 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
 
     def test_45_tab_bar_and_button_adaptive_sizing(self):
         """Verify AutoAdjustTabBar calculates generous widths so tab labels never clip"""
-        from settings_dialogs import PreferencesDialog, AutoAdjustTabBar
-        from i18n import I18nManager
+        from fkplayer.ui.dialogs import PreferencesDialog, AutoAdjustTabBar
+        from fkplayer.core.i18n import I18nManager
 
         # 1. Verify project_tabs uses AutoAdjustTabBar
         self.assertIsInstance(self.player.project_tabs.tabBar(), AutoAdjustTabBar)
@@ -1411,7 +1418,7 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
 
     def test_46_no_help_button_and_clean_tabbar_style(self):
         """Verify context help question mark is stripped and tab bar base line is disabled"""
-        from settings_dialogs import (
+        from fkplayer.ui.dialogs import (
             PreferencesDialog, NewCanvasDialog, WindowCaptureDialog,
             TextOverlayDialog, ExportDialog, AboutDialog, WelcomeDialog,
             UpdatesDialog, DIALOG_STYLE
@@ -1486,7 +1493,7 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         self.assertEqual(len(close_events), 1, "FKVideoPlayer must have exactly one unified closeEvent definition")
 
         # 5. Verify safe_open_url in settings_dialogs handles invalid inputs gracefully
-        from settings_dialogs import safe_open_url
+        from fkplayer.ui.dialogs import safe_open_url
         safe_open_url("") # Should not raise
         safe_open_url(None) # Should not raise
 
