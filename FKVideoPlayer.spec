@@ -11,7 +11,7 @@ datas = [
     (branding_ico, 'assets/branding'),
     (branding_png, 'assets/branding'),
     (branding_ico, '.'),
-] + collect_data_files('_soundfile_data')
+] + collect_data_files('_soundfile_data') + collect_data_files('av')
 
 ffmpeg_candidate = r'C:\ffmpeg\ffmpeg.exe'
 if os.path.exists(ffmpeg_candidate):
@@ -20,10 +20,10 @@ if os.path.exists(ffmpeg_candidate):
 hiddenimports = [
     'fkplayer', 'fkplayer.player', 'fkplayer.app',
     'fkplayer.core', 'fkplayer.core.i18n', 'fkplayer.core.logger', 'fkplayer.core.projects',
-    'fkplayer.media', 'fkplayer.media.audio', 'fkplayer.media.capture',
+    'fkplayer.media', 'fkplayer.media.audio', 'fkplayer.media.capture', 'fkplayer.media.reader',
     'fkplayer.ui', 'fkplayer.ui.widgets', 'fkplayer.ui.dialogs',
-    'soundcard', 'soundfile', '_soundfile_data', 'cffi'
-] + collect_submodules('soundcard') + collect_submodules('fkplayer')
+    'soundcard', 'soundfile', '_soundfile_data', 'cffi', 'av'
+] + collect_submodules('soundcard') + collect_submodules('fkplayer') + collect_submodules('av')
 
 a = Analysis(
     ['player.py'],
