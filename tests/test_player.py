@@ -1776,6 +1776,77 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
 
         print("[OK] Hardware scaling, zero-copy buffer, and smooth playback pipeline verified")
 
+    def test_53_overlay_undo_and_clear(self):
+        """Verify Undo (Ctrl+Z) and Clear (C/Del) fully work with overlays, transforms, and drawings."""
+        canvas = self.player.canvas
+        canvas.strokes.clear()
+        canvas.overlays.clear()
+        canvas.undo_stack.clear()
+        img_path = resource_path("icon.png")
+
+        # 1. Add overlay and verify Undo removes it
+        self.player.add_overlay(img_path)
+        self.assertEqual(len(canvas.overlays), 1)
+        ov = canvas.overlays[0]
+        self.player.btn_undo.click()
+        self.assertEqual(len(canvas.overlays), 0, "Undo must remove added overlay")
+
+        # 2. Add text overlay and duplicate, verify Undo removes duplicate
+        self.player.add_text_overlay({'text': 'Hello World'})
+        self.assertEqual(len(canvas.overlays), 1)
+        text_ov = canvas.overlays[0]
+        self.player.duplicate_overlay(text_ov)
+        self.assertEqual(len(canvas.overlays), 2)
+        self.player.undo_last_action()
+        self.assertEqual(len(canvas.overlays), 1, "Undo must remove duplicated overlay")
+        self.assertEqual(canvas.overlays[0], text_ov)
+
+        # 3. Test overlay transform undo (move/resize)
+        orig_rect = QRectF(text_ov.rect)
+        canvas.selected_overlays = [text_ov]
+        canvas._overlay_drag_mode = 'move'
+        canvas._drag_start_rects = {text_ov: QRectF(orig_rect)}
+        text_ov.rect.translate(100.0, 50.0)
+        transforms = [(text_ov, orig_rect, QRectF(text_ov.rect))]
+        canvas.undo_stack.append(('transform_overlay', transforms))
+        canvas._overlay_drag_mode = None
+        self.assertAlmostEqual(text_ov.rect.x(), orig_rect.x() + 100.0, places=1)
+        self.player.undo_last_action()
+        self.assertAlmostEqual(text_ov.rect.x(), orig_rect.x(), places=1, msg="Undo must restore overlay rect")
+
+        # 4. Test delete overlay and Undo restores it
+        canvas.selected_overlay = text_ov
+        self.player.delete_selected_overlay()
+        self.assertEqual(len(canvas.overlays), 0, "Overlay must be deleted")
+        self.player.undo_last_action()
+        self.assertEqual(len(canvas.overlays), 1, "Undo must restore deleted overlay")
+        self.assertEqual(canvas.overlays[0].text, 'Hello World')
+
+        # 5. Test clear_all_drawings clears BOTH strokes and overlays
+        s1 = Stroke(QColor("#FF0000"), 4.0, [QPointF(10, 10), QPointF(20, 20)])
+        canvas.strokes.append(s1)
+        canvas.undo_stack.append(('add', s1))
+        self.assertEqual(len(canvas.strokes), 1)
+        self.assertEqual(len(canvas.overlays), 1)
+
+        self.player.btn_clear_all.click()
+        self.assertEqual(len(canvas.strokes), 0, "Clear must clear strokes")
+        self.assertEqual(len(canvas.overlays), 0, "Clear must clear overlays")
+
+        # 6. Test Undo after clear restores BOTH strokes and overlays
+        self.player.btn_undo.click()
+        self.assertEqual(len(canvas.strokes), 1, "Undo must restore strokes after clear")
+        self.assertEqual(len(canvas.overlays), 1, "Undo must restore overlays after clear")
+        self.assertEqual(canvas.overlays[0].text, 'Hello World')
+
+        # Clean up
+        for o in canvas.overlays:
+            o.close()
+        canvas.overlays.clear()
+        canvas.strokes.clear()
+        canvas.undo_stack.clear()
+        print("[OK] Overlay undo, deletion restore, transform undo, and unified clear verified")
+
 
 if __name__ == "__main__":
     unittest.main()

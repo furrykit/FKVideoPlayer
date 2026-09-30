@@ -336,6 +336,16 @@ class OverlayObject:
             return self._load_and_cache_frame(target_f)
         return None
 
+    def reopen(self):
+        if self.obj_type == self.TYPE_VIDEO:
+            if self.video_cap is None or not self.video_cap.isOpened():
+                if self.file_path and os.path.exists(self.file_path):
+                    self._load_media()
+        elif self.obj_type in (self.TYPE_IMAGE, self.TYPE_GIF):
+            if self.static_image is None or self.static_image.isNull():
+                if self.file_path and os.path.exists(self.file_path):
+                    self._load_media()
+
     def close(self):
         if self.video_cap is not None:
             try:
@@ -496,22 +506,43 @@ class VideoCanvas(QWidget):
         self.update_cursor()
         self.update()
 
-    def remove_overlay(self, ov):
+    def remove_overlay(self, ov, record_undo=True):
         if ov in self.overlays:
+            idx = self.overlays.index(ov)
             self.overlays.remove(ov)
             if self.recorder:
                 self.recorder.record_overlay_remove(ov.obj_id)
             ov.close()
             if ov in self.selected_overlays:
                 self.selected_overlays.remove(ov)
+            if record_undo:
+                self.undo_stack.append(('delete_overlay', [(ov, idx)]))
             p = self.window()
             if hasattr(p, '_refresh_overlay_tracks'):
                 p._refresh_overlay_tracks()
             self.update()
+            self.drawing_changed.emit()
 
-    def remove_selected_overlays(self):
+    def remove_selected_overlays(self, record_undo=True):
+        if not self.selected_overlays:
+            return
+        items = []
         for ov in list(self.selected_overlays):
-            self.remove_overlay(ov)
+            if ov in self.overlays:
+                idx = self.overlays.index(ov)
+                items.append((ov, idx))
+                self.overlays.remove(ov)
+                if self.recorder:
+                    self.recorder.record_overlay_remove(ov.obj_id)
+                ov.close()
+        self.selected_overlays.clear()
+        if items and record_undo:
+            self.undo_stack.append(('delete_overlay', items))
+        p = self.window()
+        if hasattr(p, '_refresh_overlay_tracks'):
+            p._refresh_overlay_tracks()
+        self.update()
+        self.drawing_changed.emit()
 
     def _get_current_time(self) -> float:
         if self.recorder and self.recorder.is_active():
@@ -636,21 +667,44 @@ class VideoCanvas(QWidget):
         return QPointF(sx, sy)
 
     def clear_all_drawings(self, *args):
-        if not self.strokes:
+        if not self.strokes and not self.overlays:
             return
-        self.undo_stack.append(('clear', list(self.strokes)))
+        saved_strokes = list(self.strokes)
+        saved_overlays = list(self.overlays)
+        self.undo_stack.append(('clear_all', (saved_strokes, saved_overlays)))
         self.strokes.clear()
+        for ov in self.overlays:
+            ov.close()
+        self.overlays.clear()
+        self.selected_overlays.clear()
         if self.recorder:
             self.recorder.record_clear()
+            for ov in saved_overlays:
+                self.recorder.record_overlay_remove(ov.obj_id)
+        p = self.window()
+        if hasattr(p, '_refresh_overlay_tracks'):
+            p._refresh_overlay_tracks()
         self.update()
         self.drawing_changed.emit()
 
     def undo_last_action(self, *args):
+        p = self.window()
         if not self.undo_stack:
             if self.strokes:
                 self.strokes.pop()
                 if self.recorder:
                     self.recorder.record_undo()
+                self.update()
+                self.drawing_changed.emit()
+            elif self.overlays:
+                ov = self.overlays.pop()
+                ov.close()
+                if ov in self.selected_overlays:
+                    self.selected_overlays.remove(ov)
+                if hasattr(p, '_refresh_overlay_tracks'):
+                    p._refresh_overlay_tracks()
+                if self.recorder and self.recorder.is_active():
+                    self.recorder.record_overlay_remove(ov.obj_id)
                 self.update()
                 self.drawing_changed.emit()
             return
@@ -659,6 +713,48 @@ class VideoCanvas(QWidget):
         if action_type == 'add':
             if payload in self.strokes:
                 self.strokes.remove(payload)
+        elif action_type == 'add_overlay':
+            ov = payload
+            if ov in self.overlays:
+                self.overlays.remove(ov)
+                ov.close()
+            if ov in self.selected_overlays:
+                self.selected_overlays.remove(ov)
+            if hasattr(p, '_refresh_overlay_tracks'):
+                p._refresh_overlay_tracks()
+            if self.recorder and self.recorder.is_active():
+                self.recorder.record_overlay_remove(ov.obj_id)
+        elif action_type == 'delete_overlay':
+            items = payload if isinstance(payload, list) else [payload]
+            for item in items:
+                if isinstance(item, tuple):
+                    ov, idx = item
+                else:
+                    ov, idx = item, len(self.overlays)
+                if hasattr(ov, 'reopen'):
+                    ov.reopen()
+                target_idx = min(idx, len(self.overlays))
+                if ov not in self.overlays:
+                    self.overlays.insert(target_idx, ov)
+            self.selected_overlays = [item[0] if isinstance(item, tuple) else item for item in items]
+            if hasattr(p, '_refresh_overlay_tracks'):
+                p._refresh_overlay_tracks()
+            if self.recorder and self.recorder.is_active():
+                for item in items:
+                    ov = item[0] if isinstance(item, tuple) else item
+                    self.recorder.record_overlay_add(ov)
+        elif action_type == 'transform_overlay':
+            for ov, old_rect, new_rect in payload:
+                ov.rect = QRectF(old_rect)
+            if hasattr(p, '_refresh_overlay_tracks'):
+                p._refresh_overlay_tracks()
+            if self.recorder and self.recorder.is_active():
+                for ov, _, _ in payload:
+                    self.recorder.record_overlay_transform(ov)
+        elif action_type == 'reorder_overlays':
+            self.overlays = list(payload)
+            if hasattr(p, '_refresh_overlay_tracks'):
+                p._refresh_overlay_tracks()
         elif action_type == 'erase':
             stroke, original_idx = payload
             idx = min(original_idx, len(self.strokes))
@@ -671,8 +767,21 @@ class VideoCanvas(QWidget):
                         self.strokes.remove(r)
                 idx = min(orig_idx, len(self.strokes))
                 self.strokes.insert(idx, orig_stroke)
-        elif action_type == 'clear':
-            self.strokes = list(payload)
+        elif action_type in ('clear', 'clear_all'):
+            if action_type == 'clear_all' or (isinstance(payload, (tuple, list)) and len(payload) == 2 and isinstance(payload[0], list) and isinstance(payload[1], list)):
+                saved_strokes, saved_overlays = payload
+                self.strokes = list(saved_strokes)
+                self.overlays = list(saved_overlays)
+                for ov in self.overlays:
+                    if hasattr(ov, 'reopen'):
+                        ov.reopen()
+                if hasattr(p, '_refresh_overlay_tracks'):
+                    p._refresh_overlay_tracks()
+                if self.recorder and self.recorder.is_active():
+                    for ov in self.overlays:
+                        self.recorder.record_overlay_add(ov)
+            else:
+                self.strokes = list(payload)
 
         if self.recorder:
             self.recorder.record_undo()
@@ -889,8 +998,10 @@ class VideoCanvas(QWidget):
             ov.keep_aspect_ratio = not getattr(ov, 'keep_aspect_ratio', True)
             self.update()
         elif chosen == act_del:
-            for o in (list(self.selected_overlays) if self.selected_overlays else [ov]):
-                self.remove_overlay(o)
+            if self.selected_overlays:
+                self.remove_selected_overlays()
+            else:
+                self.remove_overlay(ov)
         elif chosen == act_add_media:
             if hasattr(player, 'add_overlay_dialog'):
                 player.add_overlay_dialog(pos=vpt)
@@ -1098,6 +1209,7 @@ class VideoCanvas(QWidget):
                         self._overlay_drag_mode = handle
                         self._drag_start_vpt = vpt
                         self._drag_start_rect = QRectF(ov.rect)
+                        self._drag_start_rects = {ov: QRectF(ov.rect)}
                         return
 
                 # Check overlay body hit
@@ -1288,6 +1400,18 @@ class VideoCanvas(QWidget):
                 if self.recorder:
                     for ov in self.selected_overlays:
                         self.recorder.record_overlay_transform(ov)
+                if getattr(self, '_drag_start_rects', None):
+                    transforms = []
+                    for ov in self.selected_overlays:
+                        old_r = self._drag_start_rects.get(ov)
+                        if old_r and (abs(old_r.x() - ov.rect.x()) > 0.5 or
+                                     abs(old_r.y() - ov.rect.y()) > 0.5 or
+                                     abs(old_r.width() - ov.rect.width()) > 0.5 or
+                                     abs(old_r.height() - ov.rect.height()) > 0.5):
+                            transforms.append((ov, old_r, QRectF(ov.rect)))
+                    if transforms:
+                        self.undo_stack.append(('transform_overlay', transforms))
+                        self.drawing_changed.emit()
                 self._overlay_drag_mode = None
                 self._drag_start_vpt = None
                 self._drag_start_rect = None

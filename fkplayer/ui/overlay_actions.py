@@ -26,11 +26,15 @@ class OverlayActionsMixin:
     """Mixin providing overlay manipulation, drag&drop, and canvas generation."""
 
     def delete_selected_overlay(self):
-        if self.canvas.selected_overlay:
+        if getattr(self.canvas, 'selected_overlays', None):
+            self.canvas.remove_selected_overlays()
+        elif self.canvas.selected_overlay:
             self.canvas.remove_overlay(self.canvas.selected_overlay)
 
     def _on_delete_shortcut(self):
-        if self.canvas.active_tool == VideoCanvas.TOOL_SELECT and self.canvas.selected_overlay:
+        if self.canvas.active_tool == VideoCanvas.TOOL_SELECT and (
+            getattr(self.canvas, 'selected_overlays', None) or self.canvas.selected_overlay
+        ):
             self.delete_selected_overlay()
         else:
             self.canvas.clear_all_drawings()
@@ -41,33 +45,45 @@ class OverlayActionsMixin:
 
     def bring_overlay_to_front(self, ov):
         if ov and ov in self.canvas.overlays:
+            old_order = list(self.canvas.overlays)
             self.canvas.overlays.remove(ov)
             self.canvas.overlays.append(ov)
+            self.canvas.undo_stack.append(('reorder_overlays', old_order))
             self.canvas.update()
+            self._refresh_overlay_tracks()
 
     def send_overlay_to_back(self, ov):
         if ov and ov in self.canvas.overlays:
+            old_order = list(self.canvas.overlays)
             self.canvas.overlays.remove(ov)
             self.canvas.overlays.insert(0, ov)
+            self.canvas.undo_stack.append(('reorder_overlays', old_order))
             self.canvas.update()
+            self._refresh_overlay_tracks()
 
     def bring_overlay_forward(self, ov):
         if ov and ov in self.canvas.overlays:
             idx = self.canvas.overlays.index(ov)
             if idx < len(self.canvas.overlays) - 1:
+                old_order = list(self.canvas.overlays)
                 self.canvas.overlays[idx], self.canvas.overlays[idx + 1] = (
                     self.canvas.overlays[idx + 1], self.canvas.overlays[idx]
                 )
+                self.canvas.undo_stack.append(('reorder_overlays', old_order))
                 self.canvas.update()
+                self._refresh_overlay_tracks()
 
     def send_overlay_backward(self, ov):
         if ov and ov in self.canvas.overlays:
             idx = self.canvas.overlays.index(ov)
             if idx > 0:
+                old_order = list(self.canvas.overlays)
                 self.canvas.overlays[idx], self.canvas.overlays[idx - 1] = (
                     self.canvas.overlays[idx - 1], self.canvas.overlays[idx]
                 )
+                self.canvas.undo_stack.append(('reorder_overlays', old_order))
                 self.canvas.update()
+                self._refresh_overlay_tracks()
 
     def duplicate_overlay(self, ov):
         if not ov or ov not in self.canvas.overlays:
@@ -79,8 +95,11 @@ class OverlayActionsMixin:
         new_ov = OverlayObject(sid, ov.file_path, new_rect, start_time=cur_t)
         self.canvas.overlays.append(new_ov)
         self.canvas.selected_overlay = new_ov
+        self.canvas.undo_stack.append(('add_overlay', new_ov))
         if self.recorder.is_active():
             self.recorder.record_overlay_add(new_ov)
+        self._refresh_overlay_tracks()
+        self.canvas.drawing_changed.emit()
         self.canvas.update()
 
     def _on_overlay_anim_tick(self):
@@ -132,12 +151,14 @@ class OverlayActionsMixin:
         overlay = OverlayObject(sid, file_path, QRectF(ox, oy, ow, oh), start_time=cur_t)
         self.canvas.overlays.append(overlay)
         self.canvas.selected_overlay = overlay
+        self.canvas.undo_stack.append(('add_overlay', overlay))
 
         if self.recorder.is_active():
             self.recorder.record_overlay_add(overlay)
 
         self._select_tool(VideoCanvas.TOOL_SELECT)
         self._refresh_overlay_tracks()
+        self.canvas.drawing_changed.emit()
         self.canvas.update()
         logger.info(f"Overlay created: sid={sid}, rect=({ox:.1f}, {oy:.1f}, {ow:.1f}, {oh:.1f})")
 
@@ -320,10 +341,12 @@ class OverlayActionsMixin:
         ov = OverlayObject(sid, 'text', rect, start_time=cur_t, text_data=text_data)
         self.canvas.overlays.append(ov)
         self.canvas.selected_overlay = ov
+        self.canvas.undo_stack.append(('add_overlay', ov))
         self.canvas.active_tool = VideoCanvas.TOOL_SELECT
         self._select_tool(VideoCanvas.TOOL_SELECT)
         if self.recorder.is_active():
             self.recorder.record_overlay_add(ov)
+        self.canvas.drawing_changed.emit()
         self.canvas.update()
         self._refresh_overlay_tracks()
 
