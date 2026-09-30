@@ -9,7 +9,7 @@ import sys
 import math
 from PyQt5.QtCore import QPointF
 
-APP_VERSION = "1.1.5"
+APP_VERSION = "1.1.6"
 
 
 def set_dark_titlebar(window):

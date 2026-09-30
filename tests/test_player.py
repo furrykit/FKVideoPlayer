@@ -1853,7 +1853,7 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         from fkplayer.core.geometry import APP_VERSION
         from PyQt5.QtWidgets import QLabel
         self.assertEqual(CURRENT_VERSION, APP_VERSION)
-        self.assertEqual(APP_VERSION, "1.1.5")
+        self.assertEqual(APP_VERSION, "1.1.6")
 
         dlg = UpdatesDialog(parent=self.player)
         lbls = dlg.findChildren(QLabel)
