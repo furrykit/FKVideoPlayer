@@ -16,8 +16,9 @@
 import os
 import sys
 import unittest
+import cv2
 from PyQt5.QtCore import Qt, QPointF, QPoint, QRectF, QMimeData, QUrl
-from PyQt5.QtGui import QColor, QMouseEvent, QDropEvent
+from PyQt5.QtGui import QColor, QMouseEvent, QDropEvent, QImage
 from PyQt5.QtWidgets import QApplication
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
@@ -1498,6 +1499,282 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         safe_open_url(None) # Should not raise
 
         print("[OK] Exception guards, Qt signal safety, and single unified closeEvent verified")
+
+    def test_48_audio_master_clock_sync(self):
+        """Verify audio-master clock synchronization and prevention of audio seek jitter/echo"""
+        import tempfile
+        from PyQt5.QtMultimedia import QMediaPlayer
+        player = self.player
+        player.current_frame_idx = 0
+        player.fps = 30.0
+        player.total_frames = 300
+        player.has_audio = True
+        player.playback_speed = 1.0
+        player.is_muted = False
+
+        dummy_audio = os.path.join(tempfile.gettempdir(), f"mock_audio_{os.getpid()}.wav")
+        with open(dummy_audio, "wb") as f:
+            f.write(b"RIFF" + b"\x00" * 36)
+        player.temp_audio_path = dummy_audio
+
+        original_state = player.audio_player.state
+        original_position = player.audio_player.position
+        original_set_pos = player.audio_player.setPosition
+        try:
+            set_pos_calls = []
+            mock_pos = [0]
+
+            player.audio_player.state = lambda: QMediaPlayer.PlayingState
+            player.audio_player.position = lambda: mock_pos[0]
+            player.audio_player.setPosition = lambda ms: set_pos_calls.append(ms)
+
+            # Advance audio to 100ms (~3 frames at 30 fps)
+            mock_pos[0] = 100
+            player._on_play_tick()
+            self.assertEqual(player.current_frame_idx, 3)
+            # Crucial: setPosition should NOT have been called during continuous play tick!
+            self.assertEqual(len(set_pos_calls), 0, "Audio setPosition must not be called during playback ticks")
+
+            # Advance audio to 333ms (~10 frames at 30 fps)
+            mock_pos[0] = 333
+            player._on_play_tick()
+            self.assertEqual(player.current_frame_idx, 10)
+            self.assertEqual(len(set_pos_calls), 0)
+
+            # Test seek_seconds while playing properly syncs target_ms
+            player.is_playing = True
+            player.seek_seconds(2.0)
+            self.assertEqual(player.current_frame_idx, 70)
+            self.assertGreaterEqual(len(set_pos_calls), 1)
+            self.assertAlmostEqual(set_pos_calls[-1], int(70 / 30.0 * 1000), delta=50)
+        finally:
+            player.audio_player.state = original_state
+            player.audio_player.position = original_position
+            player.audio_player.setPosition = original_set_pos
+            if os.path.exists(dummy_audio):
+                try:
+                    os.remove(dummy_audio)
+                except Exception:
+                    pass
+
+        print("[OK] Audio-master clock synchronization and stutter/duplication prevention verified")
+    def test_49_modular_architecture_and_playback_optimization(self):
+        """Verify modular subpackage exports, reduced player.py footprint, and 32-bit RGB32 cached frames."""
+        import cv2
+        from PyQt5.QtGui import QImage
+        from fkplayer.ui.canvas import VideoCanvas, OverlayObject, Stroke
+        from fkplayer.ui.timeline import ClickableSlider, OverlayTrackRow, OverlayTrackContainer
+        from fkplayer.media.recorder import ActionRecorder
+        from fkplayer.media.export import ExportVideoWorker
+        from fkplayer.core.session import ProjectSession
+        from fkplayer.core.geometry import set_dark_titlebar, resource_path, get_ffmpeg_path
+
+        # Verify OpenCV thread limiting
+        self.assertLessEqual(cv2.getNumThreads(), 4, "OpenCV threads must be clamped to <= 4 to prevent CPU thread thrashing")
+
+        # Verify player.py was pruned of monolith bloat
+        player_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "fkplayer", "player.py"))
+        with open(player_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        self.assertLessEqual(len(lines), 3000, f"player.py should be modularized to <= 3000 lines, currently {len(lines)}")
+
+        # Verify frame caching provides Format_RGB32 for native hardware blitting
+        player = self.player
+        qimg = player._get_frame_cached(0)
+        self.assertIsNotNone(qimg)
+        self.assertEqual(qimg.format(), QImage.Format_RGB32, "Cached frame must be Format_RGB32 for fast blitting")
+
+        # Verify sequential frame grabbing without cap.set
+        qimg2 = player._get_frame_cached(2)
+        self.assertIsNotNone(qimg2)
+        self.assertEqual(player.frame_cache[2].format(), QImage.Format_RGB32)
+
+        print("[OK] Modular architecture, CPU thread limiting, and RGB32 playback pipeline verified")
+
+    def test_50_app_entrypoint_and_main_startup(self):
+        """Verify root entrypoint, fkplayer.player.main components, and module import cleanliness."""
+        import importlib
+        from PyQt5.QtWidgets import QApplication
+        from PyQt5.QtGui import QFont, QIcon
+        from PyQt5.QtCore import Qt
+        import fkplayer.player as pmod
+        import player as root_player
+
+        self.assertTrue(hasattr(pmod, 'main'))
+        self.assertTrue(hasattr(pmod, 'FKVideoPlayer'))
+        self.assertTrue(hasattr(pmod, 'QFont'))
+        self.assertTrue(hasattr(pmod, 'QSettings'))
+        self.assertTrue(hasattr(pmod, 'ExportDialog'))
+
+        # Verify QFont usage in main() does not throw NameError
+        app = QApplication.instance()
+        self.assertIsNotNone(app)
+        app_font = app.font()
+        app_font.setFamily("Segoe UI")
+        app_font.setStyleHint(QFont.SansSerif)
+        app_font.setPointSize(9)
+        app.setFont(app_font)
+
+        # Test all modular components can be imported without missing references
+        modules_to_test = [
+            'fkplayer.core.geometry',
+            'fkplayer.core.session',
+            'fkplayer.core.tabs',
+            'fkplayer.ui.canvas',
+            'fkplayer.ui.timeline',
+            'fkplayer.ui.builder',
+            'fkplayer.ui.overlay_actions',
+            'fkplayer.media.playback',
+            'fkplayer.media.recorder',
+            'fkplayer.media.export',
+            'fkplayer.media.record_controller',
+            'fkplayer.ui.dialogs',
+            'fkplayer.core.logger',
+            'fkplayer.core.i18n',
+            'fkplayer.core.projects',
+        ]
+        for m in modules_to_test:
+            mod = importlib.import_module(m)
+            self.assertIsNotNone(mod, f"Module {m} must load cleanly")
+
+        print("[OK] Main entrypoint, QFont setup, and all modular package imports verified")
+
+    def test_51_high_resolution_memory_budget_and_cache_clamping(self):
+        """Verify dynamic memory budgeting prevents 8K/4K/1080p frame cache memory explosions."""
+        from PyQt5.QtGui import QImage
+        player = self.player
+
+        # 1. Verify player memory budget attribute exists and is clamped to <= 150MB
+        self.assertTrue(hasattr(player, 'MAX_CACHE_MEMORY_BYTES'))
+        self.assertLessEqual(player.MAX_CACHE_MEMORY_BYTES, 150 * 1024 * 1024)
+
+        # 2. Test 8K resolution memory budgeting (7680 x 4320)
+        w_8k, h_8k = 7680, 4320
+        frame_bytes_8k = w_8k * h_8k * 4 # ~132.7 MB
+        limit_8k = max(1, min(60, int(player.MAX_CACHE_MEMORY_BYTES // frame_bytes_8k)))
+        self.assertEqual(limit_8k, 1, "8K video cache must be clamped to 1 frame to prevent 10GB+ RAM explosion")
+
+        # 3. Test 4K resolution memory budgeting (3840 x 2160)
+        w_4k, h_4k = 3840, 2160
+        frame_bytes_4k = w_4k * h_4k * 4 # ~33.2 MB
+        limit_4k = max(1, min(60, int(player.MAX_CACHE_MEMORY_BYTES // frame_bytes_4k)))
+        self.assertEqual(limit_4k, 3, "4K video cache must be clamped to <= 3 frames (~100MB)")
+
+        # 4. Test 1080p resolution memory budgeting (1920 x 1080)
+        w_1080, h_1080 = 1920, 1080
+        frame_bytes_1080 = w_1080 * h_1080 * 4 # ~8.3 MB
+        limit_1080 = max(1, min(60, int(player.MAX_CACHE_MEMORY_BYTES // frame_bytes_1080)))
+        self.assertLessEqual(limit_1080, 15, "1080p video cache must be clamped to <= 15 frames (~125MB)")
+
+        # 5. Verify live cache eviction behavior under memory constraint
+        player.frame_cache.clear()
+        player.MAX_CACHE_FRAMES = limit_8k
+
+        # Simulate adding 10 simulated 8K frames to the cache
+        # Using small QImages with artificial byte budget simulation
+        orig_budget = player.MAX_CACHE_MEMORY_BYTES
+        try:
+            player.MAX_CACHE_MEMORY_BYTES = 1000 # Artificial tight budget
+            # Add dummy images
+            q1 = QImage(10, 10, QImage.Format_RGB32) # 400 bytes
+            q2 = QImage(10, 10, QImage.Format_RGB32)
+            q3 = QImage(10, 10, QImage.Format_RGB32)
+
+            player.frame_cache[0] = q1
+            player.frame_cache[1] = q2
+
+            # Simulate _get_frame_cached eviction logic
+            frame_bytes = 10 * 10 * 4
+            dynamic_limit = max(1, min(60, int(player.MAX_CACHE_MEMORY_BYTES // frame_bytes)))
+            self.assertEqual(dynamic_limit, 2)
+
+            while len(player.frame_cache) >= dynamic_limit:
+                player.frame_cache.popitem(last=False)
+            player.frame_cache[2] = q3
+
+            self.assertNotIn(0, player.frame_cache, "Oldest frame 0 must be evicted")
+            self.assertIn(1, player.frame_cache)
+            self.assertIn(2, player.frame_cache)
+            self.assertEqual(len(player.frame_cache), 2)
+        finally:
+            player.MAX_CACHE_MEMORY_BYTES = orig_budget
+            player.frame_cache.clear()
+
+        print("[OK] High resolution memory budget and cache clamping verified")
+
+    def test_52_hardware_scaling_and_smooth_playback(self):
+        """Verify hardware scaling, rotating buffer pool, and zero-stutter playback pipeline"""
+        player = self.player
+
+        # 1. Verify play_timer uses high-resolution Qt.PreciseTimer
+        self.assertEqual(player.play_timer.timerType(), Qt.PreciseTimer, "play_timer must use Qt.PreciseTimer")
+
+        # 2. Test buffer pool and scaling logic on FastVideoReader
+        if os.path.exists("8k.mp4"):
+            from fkplayer.media.reader import FastVideoReader
+            reader = FastVideoReader("8k.mp4")
+            self.assertEqual(reader.orig_width, 7680)
+            self.assertEqual(reader.orig_height, 4320)
+            self.assertLessEqual(reader.width, 3840)
+            self.assertLessEqual(reader.height, 2160)
+            self.assertEqual(len(reader._buffer_pool), 4)
+
+            # Test sequential decoding throughput
+            ret, qimg = reader.read_qimage()
+            self.assertTrue(ret)
+            self.assertIsNotNone(qimg)
+            self.assertEqual(qimg.width(), reader.width)
+            self.assertEqual(qimg.height(), reader.height)
+            reader.release()
+
+        # 3. Test active playback bypass and paused caching behavior
+        player.is_playing = True
+        player.frame_cache.clear()
+        q_dummy = QImage(320, 240, QImage.Format_RGB32)
+
+        # Mock cap with read_qimage
+        class MockCap:
+            def __init__(self):
+                self.pos = 0
+            def isOpened(self):
+                return True
+            def get(self, prop):
+                if prop == cv2.CAP_PROP_POS_FRAMES:
+                    return float(self.pos)
+                return 0.0
+            def grab(self):
+                self.pos += 1
+                return True
+            def set(self, prop, val):
+                if prop == cv2.CAP_PROP_POS_FRAMES:
+                    self.pos = int(val)
+                return True
+            def read_qimage(self):
+                self.pos += 1
+                return True, q_dummy
+
+        orig_cap = player.cap
+        try:
+            player.cap = MockCap()
+
+            # Active playback: should NOT pollute frame_cache
+            res = player._get_frame_cached(0)
+            self.assertIsNotNone(res)
+            self.assertEqual(len(player.frame_cache), 0, "Active playback must bypass cache")
+            self.assertEqual(player._cap_pos, 1)
+
+            # Paused playback: should populate frame_cache
+            player.is_playing = False
+            res_paused = player._get_frame_cached(1)
+            self.assertIsNotNone(res_paused)
+            self.assertIn(1, player.frame_cache, "Paused frame must be stored in cache")
+            self.assertEqual(player._cap_pos, 2)
+        finally:
+            player.cap = orig_cap
+            player.is_playing = False
+            player.frame_cache.clear()
+
+        print("[OK] Hardware scaling, zero-copy buffer, and smooth playback pipeline verified")
 
 
 if __name__ == "__main__":

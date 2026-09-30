@@ -20,7 +20,8 @@ from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QComboBox, QSpinBox, QDoubleSpinBox, QSlider, QCheckBox, QTabWidget, QTabBar, QTableWidget, QTableWidgetItem,
     QHeaderView, QFontDialog, QColorDialog, QFileDialog, QProgressBar,
-    QMessageBox, QGroupBox, QRadioButton, QButtonGroup, QWidget, QTextEdit
+    QMessageBox, QGroupBox, QRadioButton, QButtonGroup, QWidget, QTextEdit,
+    QInputDialog
 )
 
 try:
