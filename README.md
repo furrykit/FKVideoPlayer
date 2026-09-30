@@ -100,7 +100,7 @@ python player.py
 ```
 
 ### Running Tests
-All 56 unit and integration tests run offline without external dependencies:
+All 57 unit and integration tests run offline without external dependencies:
 ```bash
 python -m unittest discover tests
 # or
@@ -152,7 +152,7 @@ FKVideoPlayer/
 │   ├── media/                 # Video decoding (NVDEC/PyAV), Win32 capture, WASAPI audio
 │   └── ui/                    # Qt widgets, canvas, timeline, dialogs
 ├── tests/
-│   └── test_player.py         # 56 unit and integration tests
+│   └── test_player.py         # 57 unit and integration tests
 ├── FKVideoPlayer.spec         # PyInstaller standalone build specification
 ├── pyproject.toml             # PEP 517/621 build configuration
 ├── requirements.txt           # Production dependencies

@@ -100,7 +100,7 @@ python player.py
 ```
 
 ### Запуск тестов
-Все 56 автотестов работают локально без внешних зависимостей:
+Все 57 автотестов работают локально без внешних зависимостей:
 ```bash
 python -m unittest discover tests
 # или
@@ -152,7 +152,7 @@ FKVideoPlayer/
 │   ├── media/                 # Декодеры NVDEC/PyAV, захват Win32, звук WASAPI
 │   └── ui/                    # Холст, таймлайн, виджеты и диалоги
 ├── tests/
-│   └── test_player.py         # 56 модульных и интеграционных тестов
+│   └── test_player.py         # 57 модульных и интеграционных тестов
 ├── FKVideoPlayer.spec         # Спецификация сборщика PyInstaller
 ├── pyproject.toml             # Стандарт пакета PEP 517/621
 ├── requirements.txt           # Зависимости рантайма

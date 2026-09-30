@@ -236,7 +236,8 @@ class RecordingMixin:
             codec=cfg['codec'],
             bitrate=cfg.get('bitrate', '10M'),
             rate_control=cfg.get('rate_control', 'vbr'),
-            audio_path=audio_target
+            audio_path=audio_target,
+            hw_accel=cfg.get('hw_accel', True)
         )
 
         def on_progress(cur, total, msg):

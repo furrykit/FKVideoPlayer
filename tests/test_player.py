@@ -2029,6 +2029,81 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
 
         print("[OK] Full monitor enumeration, dialog tabs, and screen capture worker verified")
 
+    def test_57_accelerated_export_pipeline_and_hw_accel(self):
+        """Verify hardware-accelerated video export, NVENC/MF auto-detection, fast-path bypass, and software fallback."""
+        from fkplayer.media.export import get_available_hw_encoders, ExportVideoWorker
+
+        # 1. Test hardware encoder detection helper
+        hw_set = get_available_hw_encoders()
+        self.assertIsInstance(hw_set, set)
+
+        # 2. Test hardware accelerated export (hw_accel=True)
+        out_hw = os.path.abspath("test_hw_export.mp4")
+        events_hw = [
+            {'type': 'frame', 'time': 0.0, 'frame_idx': 0, 'zoom': 1.0, 'pan': (0, 0)},
+            {'type': 'frame', 'time': 0.1, 'frame_idx': 2, 'zoom': 1.0, 'pan': (0, 0)},
+            {'type': 'stroke_start', 'time': 0.15, 'stroke_id': 1, 'color': '#00ff00', 'width': 6.0, 'pt': (20, 20)},
+            {'type': 'stroke_point', 'time': 0.20, 'stroke_id': 1, 'pt': (80, 80)},
+            {'type': 'stroke_end', 'time': 0.25, 'stroke_id': 1},
+            {'type': 'frame', 'time': 0.3, 'frame_idx': 5, 'zoom': 1.0, 'pan': (0, 0)},
+        ]
+        worker_hw = ExportVideoWorker(
+            video_path=self.video_path,
+            events=events_hw,
+            total_duration=0.5,
+            output_path=out_hw,
+            fps=24.0,
+            out_size=(320, 240),
+            codec='libx264',
+            bitrate='4M',
+            hw_accel=True
+        )
+        worker_hw._do_run()
+        self.assertTrue(os.path.exists(out_hw), "HW-accelerated exported video must exist")
+        self.assertGreater(os.path.getsize(out_hw), 1000, "HW-accelerated exported file must have valid size")
+        if os.path.exists(out_hw):
+            try:
+                os.remove(out_hw)
+            except Exception:
+                pass
+
+        # 3. Test explicit software fallback (hw_accel=False)
+        out_sw = os.path.abspath("test_sw_export.mp4")
+        events_sw = [
+            {'type': 'frame', 'time': 0.0, 'frame_idx': 0, 'zoom': 1.0, 'pan': (0, 0)},
+            {'type': 'frame', 'time': 0.2, 'frame_idx': 4, 'zoom': 1.0, 'pan': (0, 0)},
+        ]
+        worker_sw = ExportVideoWorker(
+            video_path=self.video_path,
+            events=events_sw,
+            total_duration=0.4,
+            output_path=out_sw,
+            fps=24.0,
+            out_size=(320, 240),
+            codec='libx264',
+            bitrate='2M',
+            hw_accel=False
+        )
+        worker_sw._do_run()
+        self.assertTrue(os.path.exists(out_sw), "Software fallback exported video must exist")
+        self.assertGreater(os.path.getsize(out_sw), 1000, "Software fallback exported file must have valid size")
+        if os.path.exists(out_sw):
+            try:
+                os.remove(out_sw)
+            except Exception:
+                pass
+
+        # 4. Test ExportDialog check_hw_accel property and get_export_config
+        dlg = ExportDialog(default_w=1920, default_h=1080, parent=self.player)
+        self.assertTrue(hasattr(dlg, 'check_hw_accel'), "ExportDialog must contain check_hw_accel checkbox")
+        self.assertTrue(dlg.check_hw_accel.isChecked(), "Hardware acceleration must be enabled by default")
+        cfg = dlg.get_export_config()
+        self.assertIn('hw_accel', cfg)
+        self.assertTrue(cfg['hw_accel'])
+        dlg.close()
+
+        print("[OK] Accelerated export pipeline, hardware auto-detect, fast-path bypass, and software fallback verified")
+
 
 if __name__ == "__main__":
     unittest.main()

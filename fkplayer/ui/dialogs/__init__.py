@@ -760,6 +760,11 @@ class ExportDialog(QDialog):
         self.check_audio.setChecked(has_audio)
         layout.addWidget(self.check_audio)
 
+        # Hardware Acceleration checkbox
+        self.check_hw_accel = QCheckBox(tr('dlg_export_hw_accel'))
+        self.check_hw_accel.setChecked(True)
+        layout.addWidget(self.check_hw_accel)
+
         # Output file path selector
         h_out = QHBoxLayout()
         self.edit_output_path = QLineEdit()
@@ -965,7 +970,8 @@ class ExportDialog(QDialog):
             'fps': float(self.spin_fps.value()),
             'bitrate': self._get_bitrate_str(),
             'rate_control': self.combo_rate_control.currentData(),
-            'include_audio': self.check_audio.isChecked()
+            'include_audio': self.check_audio.isChecked(),
+            'hw_accel': self.check_hw_accel.isChecked()
         }
 
 
