@@ -259,12 +259,14 @@ class RecordingMixin:
 
     def open_window_capture_dialog(self, *args):
         dlg = WindowCaptureDialog(parent=self)
-        if dlg.exec_() == 1 and dlg.selected_hwnd:
-            self.start_window_capture(dlg.selected_hwnd, dlg.selected_title)
+        if dlg.exec_() == 1 and (dlg.selected_hwnd or getattr(dlg, 'selected_rect', None)):
+            self.start_window_capture(dlg.selected_hwnd, dlg.selected_title, monitor_rect=getattr(dlg, 'selected_rect', None))
 
-    def start_window_capture(self, hwnd: int, title: str):
+    def start_window_capture(self, hwnd: int, title: str, monitor_rect: tuple = None):
+        is_monitor = (monitor_rect is not None) or (isinstance(hwnd, int) and hwnd < 0)
+        prefix = "Screen" if is_monitor else "Stream"
         if self.active_project and not self.active_project.is_empty():
-            self.new_project_tab(name=f"Stream: {title[:16]}", project_type="window")
+            self.new_project_tab(name=f"{prefix}: {title[:16]}", project_type="screen" if is_monitor else "window")
 
         self._stop_window_capture()
         if self.cap is not None:
@@ -274,28 +276,30 @@ class RecordingMixin:
         self.is_capturing_window = True
         self.captured_window_hwnd = hwnd
         self.captured_window_title = title
+        self.captured_monitor_rect = monitor_rect
         self.total_frames = 0
         self.current_frame_idx = 0
         self.fps = 30.0
         self.video_path = ""
-        tab_name = f"Stream: {title[:16]}"
+        tab_name = f"{prefix}: {title[:16]}"
         if self.active_project:
             self.active_project.name = tab_name
-            self.active_project.project_type = 'window'
+            self.active_project.project_type = 'screen' if is_monitor else 'window'
         if hasattr(self, 'project_tabs'):
             cur_idx = self.project_tabs.currentIndex()
             if cur_idx >= 0:
                 self.project_tabs.setTabText(cur_idx, tab_name)
 
-        self.setWindowTitle(f"FKVideoPlayer — Live Capture: {title}")
+        label_type = "Live Screen" if is_monitor else "Live Window"
+        self.setWindowTitle(f"FKVideoPlayer — {label_type}: {title}")
         if hasattr(self, 'lbl_time_info'):
-            self.lbl_time_info.setText(f"Live Window: {title}")
+            self.lbl_time_info.setText(f"{label_type}: {title}")
 
-        self.window_capture_worker = WindowCaptureWorker(hwnd, target_fps=30.0, parent=self)
+        self.window_capture_worker = WindowCaptureWorker(hwnd=hwnd, monitor_rect=monitor_rect, target_fps=30.0, parent=self)
         self.window_capture_worker.frame_captured.connect(self._on_captured_window_frame)
         self.window_capture_worker.start()
 
-        ProjectManager.instance().add_project('window', f'Stream: {title}', str(hwnd))
+        ProjectManager.instance().add_project('screen' if is_monitor else 'window', f'{prefix}: {title}', str(hwnd))
         self._refresh_recent_projects_menu()
 
     def _stop_window_capture(self):

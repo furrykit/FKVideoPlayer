@@ -227,7 +227,8 @@ class ActionRecorder:
             'time': self.current_time(),
             'obj_id': overlay.obj_id,
             'rect': [round(overlay.rect.x(), 2), round(overlay.rect.y(), 2),
-                     round(overlay.rect.width(), 2), round(overlay.rect.height(), 2)]
+                     round(overlay.rect.width(), 2), round(overlay.rect.height(), 2)],
+            'rotation': round(float(getattr(overlay, 'rotation', 0.0)), 2)
         })
 
     def record_overlay_remove(self, obj_id: int):

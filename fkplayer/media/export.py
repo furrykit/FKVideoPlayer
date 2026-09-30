@@ -245,6 +245,8 @@ class ExportVideoWorker(QThread):
                     oid = ev['obj_id']
                     if oid in active_overlays:
                         active_overlays[oid].rect = QRectF(*ev['rect'])
+                        if 'rotation' in ev:
+                            active_overlays[oid].rotation = float(ev['rotation'])
                 elif etype == 'overlay_remove':
                     oid = ev['obj_id']
                     ov = active_overlays.pop(oid, None)
@@ -283,6 +285,12 @@ class ExportVideoWorker(QThread):
                 ov_img = ov.get_frame_at_time(t)
                 if ov_img and not ov_img.isNull():
                     painter.save()
+                    rot = getattr(ov, 'rotation', 0.0)
+                    if rot != 0.0:
+                        center = ov.rect.center()
+                        painter.translate(center)
+                        painter.rotate(rot)
+                        painter.translate(-center)
                     if hasattr(ov, 'opacity') and ov.opacity < 1.0:
                         painter.setOpacity(ov.opacity)
                     painter.drawImage(ov.rect, ov_img)

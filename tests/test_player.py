@@ -1853,18 +1853,18 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         from fkplayer.core.geometry import APP_VERSION
         from PyQt5.QtWidgets import QLabel
         self.assertEqual(CURRENT_VERSION, APP_VERSION)
-        self.assertEqual(APP_VERSION, "1.1.4")
+        self.assertEqual(APP_VERSION, "1.1.5")
 
         dlg = UpdatesDialog(parent=self.player)
         lbls = dlg.findChildren(QLabel)
         header_text = " ".join([l.text() for l in lbls])
-        self.assertIn("v1.1.4", header_text)
+        self.assertIn(f"v{APP_VERSION}", header_text)
         self.assertNotIn("vv", header_text)
 
-        # Test simulated GitHub response with tag 'v1.1.4' - should format without double 'v'
-        dlg._on_check_finished({"is_newer": True, "tag_name": "v1.1.4", "download_url": "http://test"})
+        # Test simulated GitHub response with tag 'v1.1.5' - should format without double 'v'
+        dlg._on_check_finished({"is_newer": True, "tag_name": "v1.1.5", "download_url": "http://test"})
         self.assertNotIn("vv", dlg.lbl_status.text())
-        self.assertIn("v1.1.4", dlg.lbl_status.text())
+        self.assertIn("v1.1.5", dlg.lbl_status.text())
 
         # Test eraser continuous session
         canvas = self.player.canvas
@@ -1905,6 +1905,129 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
 
         dlg.close()
         print("[OK] Continuous eraser drag session, single-step undo, and updater version format verified")
+
+    def test_55_overlay_and_stroke_rotation(self):
+        """Verify 360-degree rotation of selected overlays and brush strokes with undo support."""
+        import math
+        from fkplayer.ui.canvas import OverlayObject, Stroke
+        canvas = self.player.canvas
+        canvas.zoom_factor = 1.0
+
+        # 1. Overlay rotation test
+        ov = OverlayObject(100, "text", QRectF(100, 100, 200, 100), text_data={'text': 'RotTest'})
+        self.assertEqual(ov.rotation, 0.0)
+        ov.rotation = 45.0
+        self.assertEqual(ov.rotation, 45.0)
+
+        # Hit test rotation handle on overlay
+        # Center of (100, 100, 200, 100) is (200, 150)
+        # Unrotated top center is (200, 100), rot stem is at y=100-24=76
+        # At 0 degrees rotation:
+        ov.rotation = 0.0
+        h_rot, _ = canvas._hit_test_overlay_handle(ov, QPointF(200, 76))
+        self.assertEqual(h_rot, 'rot')
+
+        # Rotate overlay 90 degrees and test hit test rotated into local space
+        ov.rotation = 90.0
+        # Rotated center is (200, 150). Point (200, 76) unrotated by -90:
+        # local_vpt unrotates by -90 deg around (200, 150), so a point rotated by +90 will hit 'rot'
+        c = ov.rect.center()
+        rot_handle_world = canvas._rotate_pt(QPointF(200, 76), c, 90.0)
+        h_rot_90, _ = canvas._hit_test_overlay_handle(ov, rot_handle_world)
+        self.assertEqual(h_rot_90, 'rot')
+
+        # Test overlay rotation undo
+        old_r = QRectF(ov.rect)
+        canvas.undo_stack.clear()
+        canvas.undo_stack.append(('transform_overlay', [(ov, old_r, 0.0, QRectF(ov.rect), 90.0)]))
+        ov.rotation = 90.0
+        canvas.undo_last_action()
+        self.assertEqual(ov.rotation, 0.0)
+
+        # 2. Brush stroke selection and rotation test
+        stroke = Stroke("#FF0000", 4.0, [QPointF(100, 100), QPointF(200, 100), QPointF(300, 100)], stroke_id=1)
+        br = stroke.boundingRect()
+        self.assertAlmostEqual(br.center().x(), 200.0, delta=1.0)
+        self.assertAlmostEqual(br.center().y(), 100.0, delta=1.0)
+        self.assertTrue(stroke.hit_test(QPointF(200, 100)))
+
+        canvas.strokes = [stroke]
+        canvas.selected_strokes = [stroke]
+        sr = canvas.get_selected_strokes_rect()
+        self.assertFalse(sr.isEmpty())
+
+        # Hit test rotation handle on selected stroke
+        # Top center of sr is (200, sr.top()), rot stem is at y = sr.top() - 24
+        s_h_rot, _ = canvas._hit_test_stroke_handle(QPointF(sr.center().x(), sr.top() - 24))
+        self.assertEqual(s_h_rot, 'rot')
+
+        # Rotate stroke points 90 degrees around center (200, 100)
+        initial_copy = [stroke.copy()]
+        c = QPointF(200, 100)
+        rad = math.radians(90.0)
+        cos_a, sin_a = math.cos(rad), math.sin(rad)
+        new_pts = []
+        for p in stroke.points:
+            dx, dy = p.x() - c.x(), p.y() - c.y()
+            new_pts.append(QPointF(c.x() + dx * cos_a - dy * sin_a, c.y() + dx * sin_a + dy * cos_a))
+        stroke.points = new_pts
+        stroke.rebuild_path()
+
+        # Point (100, 100) rotated 90 deg around (200, 100) should be at (200, 0)
+        self.assertAlmostEqual(stroke.points[0].x(), 200.0, delta=0.5)
+        self.assertAlmostEqual(stroke.points[0].y(), 0.0, delta=0.5)
+
+        # Undo restores horizontal stroke
+        canvas.undo_stack.clear()
+        canvas.undo_stack.append(('modify_strokes', initial_copy))
+        canvas.undo_last_action()
+        self.assertEqual(canvas.strokes[0].points[0], QPointF(100, 100))
+        self.assertEqual(canvas.strokes[0].points[-1], QPointF(300, 100))
+
+        # Test key delete on selected stroke
+        canvas.selected_strokes = [canvas.strokes[0]]
+        canvas.remove_selected_strokes(record_undo=True)
+        self.assertEqual(len(canvas.strokes), 0)
+        canvas.undo_last_action()
+        self.assertEqual(len(canvas.strokes), 1)
+
+        print("[OK] 360-degree rotation of selected overlays and brush strokes with undo verified")
+
+    def test_56_monitor_capture_and_enumeration(self):
+        """Verify full monitor / screen enumeration, dialog tabs, and capture worker."""
+        from fkplayer.media.capture import list_monitors, capture_screen_frame, WindowCaptureWorker
+        from fkplayer.ui.dialogs import WindowCaptureDialog
+
+        # Test monitor list enumeration
+        monitors = list_monitors()
+        self.assertIsInstance(monitors, list)
+        if len(monitors) > 0:
+            first_mon = monitors[0]
+            self.assertEqual(first_mon['type'], 'monitor')
+            self.assertIn('rect', first_mon)
+            self.assertIn('title', first_mon)
+            self.assertLess(first_mon['hwnd'], 0, "Monitor hwnd must be negative identifier")
+
+            # Test frame capture
+            frame = capture_screen_frame(first_mon['rect'])
+            if frame is not None:
+                self.assertEqual(len(frame.shape), 3)
+                self.assertEqual(frame.shape[2], 3)
+
+        # Test WindowCaptureWorker in monitor mode
+        worker = WindowCaptureWorker(hwnd=-1, monitor_rect=(0, 0, 640, 480), target_fps=30.0)
+        self.assertTrue(worker.is_monitor)
+
+        # Test WindowCaptureDialog tabs and UI
+        dlg = WindowCaptureDialog(parent=self.player)
+        self.assertEqual(dlg.tabs.count(), 2)
+        self.assertIn("Monitors", dlg.tabs.tabText(0))
+        self.assertIn("Windows", dlg.tabs.tabText(1))
+        self.assertIsNotNone(dlg.table_monitors)
+        self.assertIsNotNone(dlg.table_windows)
+        dlg.close()
+
+        print("[OK] Full monitor enumeration, dialog tabs, and screen capture worker verified")
 
 
 if __name__ == "__main__":

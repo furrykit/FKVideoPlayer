@@ -47,6 +47,42 @@ class Stroke:
             self.path.lineTo(p)
         self.points.append(p)
 
+    def rebuild_path(self):
+        self.path = QPainterPath()
+        if self.points:
+            self.path.moveTo(self.points[0])
+            for p in self.points[1:]:
+                self.path.lineTo(p)
+
+    def boundingRect(self) -> QRectF:
+        if not self.points:
+            return QRectF()
+        xs = [p.x() for p in self.points]
+        ys = [p.y() for p in self.points]
+        pad = max(2.0, self.width / 2.0)
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        return QRectF(min_x - pad, min_y - pad, max(1.0, max_x - min_x + pad * 2), max(1.0, max_y - min_y + pad * 2))
+
+    def hit_test(self, pt: QPointF, tolerance: float = 6.0) -> bool:
+        if not self.points:
+            return False
+        br = self.boundingRect()
+        margin = tolerance + self.width / 2.0
+        if not br.adjusted(-margin, -margin, margin, margin).contains(pt):
+            return False
+        tol_sq = (self.width / 2.0 + tolerance) ** 2
+        for i in range(len(self.points) - 1):
+            p1 = self.points[i]
+            p2 = self.points[i + 1]
+            if dist_to_segment_sq(pt, p1, p2) <= tol_sq:
+                return True
+        if len(self.points) == 1:
+            p = self.points[0]
+            if (pt.x() - p.x()) ** 2 + (pt.y() - p.y()) ** 2 <= tol_sq:
+                return True
+        return False
+
     def copy(self):
         return Stroke(self.color, self.width, [QPointF(p.x(), p.y()) for p in self.points], stroke_id=self.stroke_id)
 
@@ -64,6 +100,7 @@ class OverlayObject:
         self.rect = QRectF(rect)
         self.start_time = float(start_time)
         self.text_data = text_data
+        self.rotation = 0.0  # Angle in degrees [0, 360)
 
         if text_data or file_path == 'text':
             self.obj_type = self.TYPE_TEXT
@@ -398,11 +435,23 @@ class VideoCanvas(QWidget):
 
         self.overlays = []
         self.selected_overlays = []
+        self.selected_strokes = []
         self.hover_overlay = None
         self._overlay_drag_mode = None
         self._drag_start_vpt = None
         self._drag_start_rect = None
         self._drag_start_rects = {}
+        self._drag_start_angle = 0.0
+        self._drag_start_rotation = 0.0
+        self._drag_start_vpt_local = None
+        self._drag_pinned_world_pt = None
+
+        self._stroke_drag_mode = None
+        self._stroke_drag_center = None
+        self._drag_start_stroke_bounds = None
+        self._drag_start_stroke_points = {}
+        self._stroke_initial_strokes = None
+
         self._is_rubber_banding = False
         self._rubber_band_start = None
         self._rubber_band_rect = None
@@ -413,6 +462,52 @@ class VideoCanvas(QWidget):
         self.overlay_anim_timer.start()
 
         self.update_cursor()
+
+    @staticmethod
+    def _rotate_pt(pt: QPointF, center: QPointF, deg: float) -> QPointF:
+        rad = math.radians(deg)
+        cos_a = math.cos(rad)
+        sin_a = math.sin(rad)
+        dx = pt.x() - center.x()
+        dy = pt.y() - center.y()
+        return QPointF(center.x() + dx * cos_a - dy * sin_a, center.y() + dx * sin_a + dy * cos_a)
+
+    @staticmethod
+    def _unrotate_pt(pt: QPointF, center: QPointF, deg: float) -> QPointF:
+        return VideoCanvas._rotate_pt(pt, center, -deg)
+
+    @staticmethod
+    def _get_opposite_corner(r: QRectF, handle: str) -> QPointF:
+        if handle == 'tl':
+            return r.bottomRight()
+        elif handle == 'tr':
+            return r.bottomLeft()
+        elif handle == 'bl':
+            return r.topRight()
+        elif handle == 'br':
+            return r.topLeft()
+        return r.center()
+
+    def get_selected_strokes_rect(self) -> QRectF:
+        if not self.selected_strokes:
+            return QRectF()
+        r = self.selected_strokes[0].boundingRect()
+        for s in self.selected_strokes[1:]:
+            r = r.united(s.boundingRect())
+        return r
+
+    def remove_selected_strokes(self, record_undo=True):
+        if not self.selected_strokes:
+            return
+        if record_undo:
+            saved = [s.copy() for s in self.strokes]
+            self.undo_stack.append(('modify_strokes', saved))
+        for s in list(self.selected_strokes):
+            if s in self.strokes:
+                self.strokes.remove(s)
+        self.selected_strokes.clear()
+        self.update()
+        self.drawing_changed.emit()
 
     @property
     def selected_overlay(self):
@@ -680,6 +775,7 @@ class VideoCanvas(QWidget):
             ov.close()
         self.overlays.clear()
         self.selected_overlays.clear()
+        self.selected_strokes.clear()
         if self.recorder:
             self.recorder.record_clear()
             for ov in saved_overlays:
@@ -747,12 +843,19 @@ class VideoCanvas(QWidget):
                     ov = item[0] if isinstance(item, tuple) else item
                     self.recorder.record_overlay_add(ov)
         elif action_type == 'transform_overlay':
-            for ov, old_rect, new_rect in payload:
-                ov.rect = QRectF(old_rect)
+            for item in payload:
+                if len(item) == 5:
+                    ov, old_rect, old_rot, new_rect, new_rot = item
+                    ov.rect = QRectF(old_rect)
+                    ov.rotation = float(old_rot)
+                else:
+                    ov, old_rect, new_rect = item
+                    ov.rect = QRectF(old_rect)
             if hasattr(p, '_refresh_overlay_tracks'):
                 p._refresh_overlay_tracks()
             if self.recorder and self.recorder.is_active():
-                for ov, _, _ in payload:
+                for item in payload:
+                    ov = item[0]
                     self.recorder.record_overlay_transform(ov)
         elif action_type == 'reorder_overlays':
             self.overlays = list(payload)
@@ -891,16 +994,75 @@ class VideoCanvas(QWidget):
         zf = max(0.001, self.zoom_factor)
         hs = 14.0 / zf
 
+        c = r.center()
+        rot = getattr(ov, 'rotation', 0.0)
+        local_vpt = self._unrotate_pt(vpt, c, rot)
+
+        # 1. Rotation handle (above top center)
+        rot_stem_len = 24.0 / zf
+        rot_center = QPointF(r.center().x(), r.top() - rot_stem_len)
+        rot_r = 10.0 / zf
+        d_rot = (local_vpt.x() - rot_center.x()) ** 2 + (local_vpt.y() - rot_center.y()) ** 2
+        if d_rot <= (rot_r * 1.5) ** 2:
+            return 'rot', rot_center
+
+        # 2. Delete button (top right)
         btn_r = 10.0 / zf
-        btn_center = QPointF(r.right() + 10.0 / zf, r.top() - 10.0 / zf)
-        d_del = (vpt.x() - btn_center.x()) ** 2 + (vpt.y() - btn_center.y()) ** 2
+        btn_center = QPointF(r.right() + 12.0 / zf, r.top() - 12.0 / zf)
+        d_del = (local_vpt.x() - btn_center.x()) ** 2 + (local_vpt.y() - btn_center.y()) ** 2
         if d_del <= (btn_r * 1.4) ** 2:
             return 'del', btn_center
 
+        # 3. Corner stretch handles
         hr_tl = QRectF(r.left() - hs, r.top() - hs, hs * 2, hs * 2)
         hr_tr = QRectF(r.right() - hs, r.top() - hs, hs * 2, hs * 2)
         hr_bl = QRectF(r.left() - hs, r.bottom() - hs, hs * 2, hs * 2)
         hr_br = QRectF(r.right() - hs, r.bottom() - hs, hs * 2, hs * 2)
+
+        if hr_br.contains(local_vpt):
+            return 'br', None
+        if hr_tr.contains(local_vpt):
+            return 'tr', None
+        if hr_tl.contains(local_vpt):
+            return 'tl', None
+        if hr_bl.contains(local_vpt):
+            return 'bl', None
+
+        # 4. Body
+        if r.contains(local_vpt):
+            return 'move', None
+
+        return None, None
+
+    def _hit_test_stroke_handle(self, vpt: QPointF):
+        if not self.selected_strokes:
+            return None, None
+        sr = self.get_selected_strokes_rect()
+        if sr.isEmpty():
+            return None, None
+        zf = max(0.001, self.zoom_factor)
+        hs = 14.0 / zf
+
+        # 1. Rotation handle (above top center)
+        rot_stem_len = 24.0 / zf
+        rot_center = QPointF(sr.center().x(), sr.top() - rot_stem_len)
+        rot_r = 10.0 / zf
+        d_rot = (vpt.x() - rot_center.x()) ** 2 + (vpt.y() - rot_center.y()) ** 2
+        if d_rot <= (rot_r * 1.5) ** 2:
+            return 'rot', sr.center()
+
+        # 2. Delete button (top right)
+        btn_r = 10.0 / zf
+        btn_center = QPointF(sr.right() + 12.0 / zf, sr.top() - 12.0 / zf)
+        d_del = (vpt.x() - btn_center.x()) ** 2 + (vpt.y() - btn_center.y()) ** 2
+        if d_del <= (btn_r * 1.4) ** 2:
+            return 'del', btn_center
+
+        # 3. Corner stretch handles
+        hr_tl = QRectF(sr.left() - hs, sr.top() - hs, hs * 2, hs * 2)
+        hr_tr = QRectF(sr.right() - hs, sr.top() - hs, hs * 2, hs * 2)
+        hr_bl = QRectF(sr.left() - hs, sr.bottom() - hs, hs * 2, hs * 2)
+        hr_br = QRectF(sr.right() - hs, sr.bottom() - hs, hs * 2, hs * 2)
 
         if hr_br.contains(vpt):
             return 'br', None
@@ -911,8 +1073,12 @@ class VideoCanvas(QWidget):
         if hr_bl.contains(vpt):
             return 'bl', None
 
-        if r.contains(vpt):
-            return 'move', None
+        # 4. Body
+        if sr.contains(vpt):
+            return 'move', sr.center()
+        for s in self.selected_strokes:
+            if s.hit_test(vpt, tolerance=8.0 / zf):
+                return 'move', sr.center()
 
         return None, None
 
@@ -957,6 +1123,10 @@ class VideoCanvas(QWidget):
             menu.addSeparator()
 
         act_aspect = menu.addAction("🔓 Unlock Aspect Ratio" if getattr(ov, 'keep_aspect_ratio', True) else "🔒 Lock Aspect Ratio")
+        menu.addSeparator()
+        act_rot_cw = menu.addAction("🔄 Rotate 90° Clockwise")
+        act_rot_ccw = menu.addAction("↺ Rotate 90° Counter-Clockwise")
+        act_rot_reset = menu.addAction("🔄 Reset Rotation (0°)")
         menu.addSeparator()
         act_front = menu.addAction("Bring to Front")
         act_back = menu.addAction("Send to Back")
@@ -1009,6 +1179,21 @@ class VideoCanvas(QWidget):
         elif chosen == act_aspect:
             ov.keep_aspect_ratio = not getattr(ov, 'keep_aspect_ratio', True)
             self.update()
+        elif chosen in (act_rot_cw, act_rot_ccw, act_rot_reset):
+            old_r = QRectF(ov.rect)
+            old_rot = getattr(ov, 'rotation', 0.0)
+            if chosen == act_rot_cw:
+                new_rot = (old_rot + 90.0) % 360.0
+            elif chosen == act_rot_ccw:
+                new_rot = (old_rot - 90.0) % 360.0
+            else:
+                new_rot = 0.0
+            ov.rotation = new_rot
+            self.undo_stack.append(('transform_overlay', [(ov, old_r, old_rot, QRectF(ov.rect), new_rot)]))
+            if self.recorder and self.recorder.is_active():
+                self.recorder.record_overlay_transform(ov)
+            self.update()
+            self.drawing_changed.emit()
         elif chosen == act_del:
             if self.selected_overlays:
                 self.remove_selected_overlays()
@@ -1214,28 +1399,75 @@ class VideoCanvas(QWidget):
                 vpt = self.screen_to_video(pos)
                 ctrl_or_shift = bool(event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier))
 
-                # Check handles on currently selected overlays
+                # 1. Check handles on currently selected overlays
                 for ov in self.selected_overlays:
-                    handle, _ = self._hit_test_overlay_handle(ov, vpt)
+                    handle, h_pt = self._hit_test_overlay_handle(ov, vpt)
                     if handle == 'del':
                         self.remove_overlay(ov)
                         return
-                    elif handle in ('tl', 'tr', 'bl', 'br'):
+                    elif handle == 'rot':
                         self.selected_overlays = [ov]
-                        self._overlay_drag_mode = handle
+                        self.selected_strokes = []
+                        self._overlay_drag_mode = 'rot'
                         self._drag_start_vpt = vpt
+                        c = ov.rect.center()
+                        self._drag_start_angle = math.degrees(math.atan2(vpt.y() - c.y(), vpt.x() - c.x()))
+                        self._drag_start_rotation = getattr(ov, 'rotation', 0.0)
                         self._drag_start_rect = QRectF(ov.rect)
                         self._drag_start_rects = {ov: QRectF(ov.rect)}
+                        self.update()
+                        return
+                    elif handle in ('tl', 'tr', 'bl', 'br'):
+                        self.selected_overlays = [ov]
+                        self.selected_strokes = []
+                        self._overlay_drag_mode = handle
+                        self._drag_start_vpt = vpt
+                        c = ov.rect.center()
+                        rot = getattr(ov, 'rotation', 0.0)
+                        self._drag_start_vpt_local = self._unrotate_pt(vpt, c, rot)
+                        self._drag_start_rect = QRectF(ov.rect)
+                        self._drag_start_rects = {ov: QRectF(ov.rect)}
+                        opp = self._get_opposite_corner(ov.rect, handle)
+                        self._drag_pinned_world_pt = self._rotate_pt(opp, c, rot)
+                        self.update()
                         return
 
-                # Check overlay body hit
+                # 2. Check handles on currently selected strokes
+                if self.selected_strokes:
+                    s_handle, s_center = self._hit_test_stroke_handle(vpt)
+                    if s_handle == 'del':
+                        self.remove_selected_strokes()
+                        return
+                    elif s_handle == 'rot':
+                        self._stroke_drag_mode = 'rot'
+                        self._drag_start_vpt = vpt
+                        self._stroke_drag_center = s_center
+                        self._drag_start_angle = math.degrees(math.atan2(vpt.y() - s_center.y(), vpt.x() - s_center.x()))
+                        self._drag_start_stroke_points = {s: [QPointF(p.x(), p.y()) for p in s.points] for s in self.selected_strokes}
+                        self._stroke_initial_strokes = [s.copy() for s in self.strokes]
+                        self.update()
+                        return
+                    elif s_handle in ('tl', 'tr', 'bl', 'br'):
+                        self._stroke_drag_mode = s_handle
+                        self._drag_start_vpt = vpt
+                        self._drag_start_stroke_bounds = self.get_selected_strokes_rect()
+                        self._drag_start_stroke_points = {s: [QPointF(p.x(), p.y()) for p in s.points] for s in self.selected_strokes}
+                        self._stroke_initial_strokes = [s.copy() for s in self.strokes]
+                        self.update()
+                        return
+
+                # 3. Check overlay body hit
                 hit_ov = None
                 for ov in reversed(self.overlays):
-                    if ov.rect.contains(vpt):
+                    c = ov.rect.center()
+                    local_vpt = self._unrotate_pt(vpt, c, getattr(ov, 'rotation', 0.0))
+                    if ov.rect.contains(local_vpt):
                         hit_ov = ov
                         break
 
                 if hit_ov:
+                    if not ctrl_or_shift:
+                        self.selected_strokes = []
                     if ctrl_or_shift:
                         if hit_ov in self.selected_overlays:
                             self.selected_overlays.remove(hit_ov)
@@ -1249,12 +1481,42 @@ class VideoCanvas(QWidget):
                     self._drag_start_rects = {o: QRectF(o.rect) for o in self.selected_overlays}
                     if self.selected_overlay:
                         self._drag_start_rect = QRectF(self.selected_overlay.rect)
-                else:
+                    self.update()
+                    return
+
+                # 4. Check stroke body hit
+                hit_stroke = None
+                zf = max(0.001, self.zoom_factor)
+                for s in reversed(self.strokes):
+                    if s.hit_test(vpt, tolerance=8.0 / zf):
+                        hit_stroke = s
+                        break
+
+                if hit_stroke:
                     if not ctrl_or_shift:
                         self.selected_overlays = []
-                    self._is_rubber_banding = True
-                    self._rubber_band_start = vpt
-                    self._rubber_band_rect = QRectF(vpt, vpt)
+                    if ctrl_or_shift:
+                        if hit_stroke in self.selected_strokes:
+                            self.selected_strokes.remove(hit_stroke)
+                        else:
+                            self.selected_strokes.append(hit_stroke)
+                    else:
+                        if hit_stroke not in self.selected_strokes:
+                            self.selected_strokes = [hit_stroke]
+                    self._stroke_drag_mode = 'move'
+                    self._drag_start_vpt = vpt
+                    self._drag_start_stroke_points = {s: [QPointF(p.x(), p.y()) for p in s.points] for s in self.selected_strokes}
+                    self._stroke_initial_strokes = [s.copy() for s in self.strokes]
+                    self.update()
+                    return
+
+                # 5. Empty space clicked
+                if not ctrl_or_shift:
+                    self.selected_overlays = []
+                    self.selected_strokes = []
+                self._is_rubber_banding = True
+                self._rubber_band_start = vpt
+                self._rubber_band_rect = QRectF(vpt, vpt)
                 self.update()
 
     def mouseMoveEvent(self, event):
@@ -1307,47 +1569,142 @@ class VideoCanvas(QWidget):
                 self.update()
             elif self.active_tool == self.TOOL_SELECT and self.selected_overlays and self._overlay_drag_mode:
                 vpt = self.screen_to_video(pos)
-                dx = vpt.x() - self._drag_start_vpt.x()
-                dy = vpt.y() - self._drag_start_vpt.y()
-                sr = self._drag_start_rect
-                min_s = 20.0
                 shift_held = bool(event.modifiers() & Qt.ShiftModifier)
-
                 mode = self._overlay_drag_mode
-                if mode == 'move':
+
+                if mode == 'rot' and self.selected_overlay:
+                    ov = self.selected_overlay
+                    c = ov.rect.center()
+                    cur_angle = math.degrees(math.atan2(vpt.y() - c.y(), vpt.x() - c.x()))
+                    delta = cur_angle - self._drag_start_angle
+                    new_rot = (self._drag_start_rotation + delta) % 360.0
+                    if shift_held:
+                        new_rot = round(new_rot / 15.0) * 15.0
+                    ov.rotation = new_rot % 360.0
+                    self.update()
+                elif mode == 'move':
+                    dx = vpt.x() - self._drag_start_vpt.x()
+                    dy = vpt.y() - self._drag_start_vpt.y()
                     for o, orig_r in self._drag_start_rects.items():
                         o.rect.moveTo(orig_r.x() + dx, orig_r.y() + dy)
-                elif self.selected_overlay and sr:
+                    self.update()
+                elif self.selected_overlay and self._drag_start_rect:
                     ov = self.selected_overlay
+                    sr = self._drag_start_rect
+                    c = sr.center()
+                    rot = getattr(ov, 'rotation', 0.0)
+                    local_vpt = self._unrotate_pt(vpt, c, rot)
+                    local_start = getattr(self, '_drag_start_vpt_local', None) or self._unrotate_pt(self._drag_start_vpt, c, rot)
+                    ldx = local_vpt.x() - local_start.x()
+                    ldy = local_vpt.y() - local_start.y()
+
+                    min_s = 20.0
                     preserve_aspect = getattr(ov, 'keep_aspect_ratio', True) or shift_held
                     ratio = getattr(ov, 'orig_aspect_ratio', None) or (sr.width() / max(1.0, sr.height()))
+
+                    if mode == 'br':
+                        new_w = max(min_s, sr.width() + ldx)
+                        new_h = (new_w / ratio) if preserve_aspect else max(min_s, sr.height() + ldy)
+                        new_r = QRectF(sr.left(), sr.top(), new_w, new_h)
+                    elif mode == 'tr':
+                        new_w = max(min_s, sr.width() + ldx)
+                        new_h = (new_w / ratio) if preserve_aspect else max(min_s, sr.height() - ldy)
+                        new_r = QRectF(sr.left(), sr.bottom() - new_h, new_w, new_h)
+                    elif mode == 'bl':
+                        new_w = max(min_s, sr.width() - ldx)
+                        new_h = (new_w / ratio) if preserve_aspect else max(min_s, sr.height() + ldy)
+                        new_r = QRectF(sr.right() - new_w, sr.top(), new_w, new_h)
+                    elif mode == 'tl':
+                        new_w = max(min_s, sr.width() - ldx)
+                        new_h = (new_w / ratio) if preserve_aspect else max(min_s, sr.height() - ldy)
+                        new_r = QRectF(sr.right() - new_w, sr.bottom() - new_h, new_w, new_h)
+
+                    if rot != 0.0 and getattr(self, '_drag_pinned_world_pt', None):
+                        opp_local = self._get_opposite_corner(new_r, mode)
+                        cur_opp_world = self._rotate_pt(opp_local, new_r.center(), rot)
+                        offset = self._drag_pinned_world_pt - cur_opp_world
+                        new_r.translate(offset)
+
+                    ov.rect = new_r
+                    self.update()
+
+            elif self.active_tool == self.TOOL_SELECT and self.selected_strokes and self._stroke_drag_mode:
+                vpt = self.screen_to_video(pos)
+                shift_held = bool(event.modifiers() & Qt.ShiftModifier)
+                mode = self._stroke_drag_mode
+
+                if mode == 'rot' and self._stroke_drag_center is not None:
+                    c = self._stroke_drag_center
+                    cur_angle = math.degrees(math.atan2(vpt.y() - c.y(), vpt.x() - c.x()))
+                    delta_deg = cur_angle - self._drag_start_angle
+                    if shift_held:
+                        delta_deg = round(delta_deg / 15.0) * 15.0
+                    rad = math.radians(delta_deg)
+                    cos_a = math.cos(rad)
+                    sin_a = math.sin(rad)
+                    cx, cy = c.x(), c.y()
+                    for s, orig_pts in self._drag_start_stroke_points.items():
+                        new_pts = []
+                        for p in orig_pts:
+                            pdx = p.x() - cx
+                            pdy = p.y() - cy
+                            new_pts.append(QPointF(cx + pdx * cos_a - pdy * sin_a, cy + pdx * sin_a + pdy * cos_a))
+                        s.points = new_pts
+                        s.rebuild_path()
+                    self.update()
+
+                elif mode == 'move':
+                    dx = vpt.x() - self._drag_start_vpt.x()
+                    dy = vpt.y() - self._drag_start_vpt.y()
+                    for s, orig_pts in self._drag_start_stroke_points.items():
+                        s.points = [QPointF(p.x() + dx, p.y() + dy) for p in orig_pts]
+                        s.rebuild_path()
+                    self.update()
+
+                elif mode in ('tl', 'tr', 'bl', 'br') and self._drag_start_stroke_bounds:
+                    dx = vpt.x() - self._drag_start_vpt.x()
+                    dy = vpt.y() - self._drag_start_vpt.y()
+                    sr = self._drag_start_stroke_bounds
+                    min_s = 10.0
+                    ratio = sr.width() / max(1.0, sr.height())
+
                     if mode == 'br':
                         new_w = max(min_s, sr.width() + dx)
-                        new_h = (new_w / ratio) if preserve_aspect else max(min_s, sr.height() + dy)
-                        ov.rect = QRectF(sr.left(), sr.top(), new_w, new_h)
+                        new_h = (new_w / ratio) if shift_held else max(min_s, sr.height() + dy)
+                        new_r = QRectF(sr.left(), sr.top(), new_w, new_h)
                     elif mode == 'tr':
                         new_w = max(min_s, sr.width() + dx)
-                        new_h = (new_w / ratio) if preserve_aspect else max(min_s, sr.height() - dy)
-                        new_top = sr.bottom() - new_h
-                        ov.rect = QRectF(sr.left(), new_top, new_w, new_h)
+                        new_h = (new_w / ratio) if shift_held else max(min_s, sr.height() - dy)
+                        new_r = QRectF(sr.left(), sr.bottom() - new_h, new_w, new_h)
                     elif mode == 'bl':
                         new_w = max(min_s, sr.width() - dx)
-                        new_h = (new_w / ratio) if preserve_aspect else max(min_s, sr.height() + dy)
-                        new_left = sr.right() - new_w
-                        ov.rect = QRectF(new_left, sr.top(), new_w, new_h)
+                        new_h = (new_w / ratio) if shift_held else max(min_s, sr.height() + dy)
+                        new_r = QRectF(sr.right() - new_w, sr.top(), new_w, new_h)
                     elif mode == 'tl':
                         new_w = max(min_s, sr.width() - dx)
-                        new_h = (new_w / ratio) if preserve_aspect else max(min_s, sr.height() - dy)
-                        new_left = sr.right() - new_w
-                        new_top = sr.bottom() - new_h
-                        ov.rect = QRectF(new_left, new_top, new_w, new_h)
-                self.update()
+                        new_h = (new_w / ratio) if shift_held else max(min_s, sr.height() - dy)
+                        new_r = QRectF(sr.right() - new_w, sr.bottom() - new_h, new_w, new_h)
+
+                    sx = new_r.width() / max(1.0, sr.width())
+                    sy = new_r.height() / max(1.0, sr.height())
+
+                    for s, orig_pts in self._drag_start_stroke_points.items():
+                        new_pts = []
+                        for p in orig_pts:
+                            px = new_r.left() + (p.x() - sr.left()) * sx
+                            py = new_r.top() + (p.y() - sr.top()) * sy
+                            new_pts.append(QPointF(px, py))
+                        s.points = new_pts
+                        s.rebuild_path()
+                    self.update()
         else:
             if self.active_tool == self.TOOL_SELECT and self.video_width > 0:
                 vpt = self.screen_to_video(pos)
                 hovered = None
                 for ov in reversed(self.overlays):
-                    if ov.rect.contains(vpt):
+                    c = ov.rect.center()
+                    local_vpt = self._unrotate_pt(vpt, c, getattr(ov, 'rotation', 0.0))
+                    if ov.rect.contains(local_vpt):
                         hovered = ov
                         break
 
@@ -1355,24 +1712,53 @@ class VideoCanvas(QWidget):
                     self.hover_overlay = hovered
                     self.update()
 
+                cursor_set = False
                 if self.selected_overlay:
                     h, _ = self._hit_test_overlay_handle(self.selected_overlay, vpt)
-                    if h in ('tl', 'br'):
+                    if h == 'rot':
+                        self.setCursor(Qt.PointingHandCursor)
+                        cursor_set = True
+                    elif h in ('tl', 'br'):
                         self.setCursor(Qt.SizeFDiagCursor)
+                        cursor_set = True
                     elif h in ('tr', 'bl'):
                         self.setCursor(Qt.SizeBDiagCursor)
+                        cursor_set = True
                     elif h == 'del':
                         self.setCursor(Qt.PointingHandCursor)
+                        cursor_set = True
                     elif h == 'move':
                         self.setCursor(Qt.SizeAllCursor)
-                    elif hovered is not None:
+                        cursor_set = True
+
+                if not cursor_set and self.selected_strokes:
+                    sh, _ = self._hit_test_stroke_handle(vpt)
+                    if sh == 'rot':
+                        self.setCursor(Qt.PointingHandCursor)
+                        cursor_set = True
+                    elif sh in ('tl', 'br'):
+                        self.setCursor(Qt.SizeFDiagCursor)
+                        cursor_set = True
+                    elif sh in ('tr', 'bl'):
+                        self.setCursor(Qt.SizeBDiagCursor)
+                        cursor_set = True
+                    elif sh == 'del':
+                        self.setCursor(Qt.PointingHandCursor)
+                        cursor_set = True
+                    elif sh == 'move':
+                        self.setCursor(Qt.SizeAllCursor)
+                        cursor_set = True
+
+                if not cursor_set:
+                    if hovered is not None:
                         self.setCursor(Qt.PointingHandCursor)
                     else:
-                        self.setCursor(Qt.ArrowCursor)
-                elif hovered is not None:
-                    self.setCursor(Qt.PointingHandCursor)
-                else:
-                    self.setCursor(Qt.ArrowCursor)
+                        zf = max(0.001, self.zoom_factor)
+                        stroke_hover = any(s.hit_test(vpt, tolerance=6.0 / zf) for s in self.strokes)
+                        if stroke_hover:
+                            self.setCursor(Qt.PointingHandCursor)
+                        else:
+                            self.setCursor(Qt.ArrowCursor)
 
     def mouseReleaseEvent(self, event):
         was_panning = self.is_panning
@@ -1392,7 +1778,9 @@ class VideoCanvas(QWidget):
                 vpt = self.screen_to_video(QPointF(event.pos()))
                 clicked_ov = None
                 for ov in reversed(self.overlays):
-                    if ov.rect.contains(vpt):
+                    c = ov.rect.center()
+                    local_vpt = self._unrotate_pt(vpt, c, getattr(ov, 'rotation', 0.0))
+                    if ov.rect.contains(local_vpt):
                         clicked_ov = ov
                         break
                 if clicked_ov:
@@ -1417,14 +1805,19 @@ class VideoCanvas(QWidget):
                 self._is_rubber_banding = False
                 if self._rubber_band_rect:
                     rb = self._rubber_band_rect.normalized()
-                    hit_list = [ov for ov in self.overlays if rb.intersects(ov.rect)]
+                    hit_overlays = [ov for ov in self.overlays if rb.intersects(ov.rect)]
+                    hit_strokes = [s for s in self.strokes if rb.intersects(s.boundingRect())]
                     ctrl_or_shift = bool(event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier))
                     if ctrl_or_shift:
-                        for ov in hit_list:
+                        for ov in hit_overlays:
                             if ov not in self.selected_overlays:
                                 self.selected_overlays.append(ov)
+                        for s in hit_strokes:
+                            if s not in self.selected_strokes:
+                                self.selected_strokes.append(s)
                     else:
-                        self.selected_overlays = hit_list
+                        self.selected_overlays = hit_overlays
+                        self.selected_strokes = hit_strokes
                 self._rubber_band_rect = None
                 self.update()
                 return
@@ -1437,11 +1830,14 @@ class VideoCanvas(QWidget):
                     transforms = []
                     for ov in self.selected_overlays:
                         old_r = self._drag_start_rects.get(ov)
+                        old_rot = self._drag_start_rotation if ov == self.selected_overlay else getattr(ov, 'rotation', 0.0)
+                        cur_rot = getattr(ov, 'rotation', 0.0)
                         if old_r and (abs(old_r.x() - ov.rect.x()) > 0.5 or
                                      abs(old_r.y() - ov.rect.y()) > 0.5 or
                                      abs(old_r.width() - ov.rect.width()) > 0.5 or
-                                     abs(old_r.height() - ov.rect.height()) > 0.5):
-                            transforms.append((ov, old_r, QRectF(ov.rect)))
+                                     abs(old_r.height() - ov.rect.height()) > 0.5 or
+                                     abs(old_rot - cur_rot) > 0.5):
+                            transforms.append((ov, old_r, old_rot, QRectF(ov.rect), cur_rot))
                     if transforms:
                         self.undo_stack.append(('transform_overlay', transforms))
                         self.drawing_changed.emit()
@@ -1449,6 +1845,31 @@ class VideoCanvas(QWidget):
                 self._drag_start_vpt = None
                 self._drag_start_rect = None
                 self._drag_start_rects = {}
+                self._drag_pinned_world_pt = None
+                self.update()
+
+            if getattr(self, '_stroke_drag_mode', None):
+                initial_s = getattr(self, '_stroke_initial_strokes', None)
+                if initial_s is not None:
+                    changed = False
+                    for s_old, s_new in zip(initial_s, self.strokes):
+                        if len(s_old.points) != len(s_new.points):
+                            changed = True
+                            break
+                        for p1, p2 in zip(s_old.points, s_new.points):
+                            if abs(p1.x() - p2.x()) > 0.2 or abs(p1.y() - p2.y()) > 0.2:
+                                changed = True
+                                break
+                        if changed:
+                            break
+                    if changed:
+                        self.undo_stack.append(('modify_strokes', initial_s))
+                        self.drawing_changed.emit()
+                self._stroke_drag_mode = None
+                self._stroke_drag_center = None
+                self._drag_start_stroke_bounds = None
+                self._drag_start_stroke_points = {}
+                self._stroke_initial_strokes = None
                 self.update()
 
             if getattr(self, '_is_erasing', False):
@@ -1470,9 +1891,16 @@ class VideoCanvas(QWidget):
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
-            if self.active_tool == self.TOOL_SELECT and self.selected_overlays:
-                self.remove_selected_overlays()
-                return
+            if self.active_tool == self.TOOL_SELECT:
+                deleted = False
+                if self.selected_overlays:
+                    self.remove_selected_overlays()
+                    deleted = True
+                if self.selected_strokes:
+                    self.remove_selected_strokes()
+                    deleted = True
+                if deleted:
+                    return
         super().keyPressEvent(event)
 
     def wheelEvent(self, event):
@@ -1510,8 +1938,14 @@ class VideoCanvas(QWidget):
                 cur_time = self._get_current_time()
                 for ov in self.overlays:
                     ov_img = ov.get_frame_at_time(cur_time)
+                    rot = getattr(ov, 'rotation', 0.0)
                     if ov_img and not ov_img.isNull():
                         painter.save()
+                        if rot != 0.0:
+                            center = ov.rect.center()
+                            painter.translate(center)
+                            painter.rotate(rot)
+                            painter.translate(-center)
                         if hasattr(ov, 'opacity') and ov.opacity < 1.0:
                             painter.setOpacity(ov.opacity)
                         painter.drawImage(ov.rect, ov_img)
@@ -1519,6 +1953,11 @@ class VideoCanvas(QWidget):
 
                     if ov == self.hover_overlay and ov not in self.selected_overlays and self.active_tool == self.TOOL_SELECT:
                         painter.save()
+                        if rot != 0.0:
+                            center = ov.rect.center()
+                            painter.translate(center)
+                            painter.rotate(rot)
+                            painter.translate(-center)
                         hover_pen = QPen(QColor(0, 229, 255, 120), 1.5 / zf, Qt.DashLine)
                         painter.setPen(hover_pen)
                         painter.setBrush(Qt.NoBrush)
@@ -1527,6 +1966,12 @@ class VideoCanvas(QWidget):
 
                     if ov in self.selected_overlays and self.active_tool == self.TOOL_SELECT:
                         painter.save()
+                        if rot != 0.0:
+                            center = ov.rect.center()
+                            painter.translate(center)
+                            painter.rotate(rot)
+                            painter.translate(-center)
+
                         sel_pen = QPen(QColor("#00E5FF"), 1.8 / zf, Qt.DashLine)
                         painter.setPen(sel_pen)
                         painter.setBrush(Qt.NoBrush)
@@ -1541,8 +1986,9 @@ class VideoCanvas(QWidget):
                         painter.drawRect(QRectF(r.left() - hs / 2, r.bottom() - hs / 2, hs, hs))
                         painter.drawRect(QRectF(r.right() - hs / 2, r.bottom() - hs / 2, hs, hs))
 
+                        # Delete button
                         btn_r = 9.0 / zf
-                        btn_center = QPointF(r.right() + 10.0 / zf, r.top() - 10.0 / zf)
+                        btn_center = QPointF(r.right() + 12.0 / zf, r.top() - 12.0 / zf)
                         painter.setPen(Qt.NoPen)
                         painter.setBrush(QBrush(QColor("#FF3B30")))
                         painter.drawEllipse(btn_center, btn_r, btn_r)
@@ -1552,6 +1998,22 @@ class VideoCanvas(QWidget):
                                          QPointF(btn_center.x() + del_d, btn_center.y() + del_d))
                         painter.drawLine(QPointF(btn_center.x() + del_d, btn_center.y() - del_d),
                                          QPointF(btn_center.x() - del_d, btn_center.y() + del_d))
+
+                        # Rotation stalk and circular handle
+                        rot_stem_len = 24.0 / zf
+                        top_mid = QPointF(r.center().x(), r.top())
+                        rot_center = QPointF(r.center().x(), r.top() - rot_stem_len)
+                        painter.setPen(QPen(QColor("#00E5FF"), 1.5 / zf))
+                        painter.drawLine(top_mid, rot_center)
+
+                        rot_r = 8.0 / zf
+                        painter.setPen(QPen(QColor("#007AFF"), 1.2 / zf))
+                        painter.setBrush(QBrush(QColor("#00E5FF")))
+                        painter.drawEllipse(rot_center, rot_r, rot_r)
+                        painter.setPen(QPen(QColor("#003366"), 1.2 / zf))
+                        painter.setBrush(QBrush(QColor("#FFFFFF")))
+                        painter.drawEllipse(rot_center, rot_r * 0.45, rot_r * 0.45)
+
                         painter.restore()
 
                 if self.active_tool == self.TOOL_SELECT and self._is_rubber_banding and self._rubber_band_rect:
@@ -1575,6 +2037,54 @@ class VideoCanvas(QWidget):
                     else:
                         painter.setBrush(Qt.NoBrush)
                         painter.drawPath(stroke.path)
+
+                # Render selected strokes bounding box and handles
+                if self.selected_strokes and self.active_tool == self.TOOL_SELECT:
+                    sr = self.get_selected_strokes_rect()
+                    if not sr.isEmpty():
+                        painter.save()
+                        sel_pen = QPen(QColor("#FF9500"), 1.8 / zf, Qt.DashLine)
+                        painter.setPen(sel_pen)
+                        painter.setBrush(Qt.NoBrush)
+                        painter.drawRect(sr)
+
+                        hs = 12.0 / zf
+                        painter.setPen(QPen(QColor("#FF6D00"), 1.0 / zf))
+                        painter.setBrush(QBrush(QColor("#FF9500")))
+                        painter.drawRect(QRectF(sr.left() - hs / 2, sr.top() - hs / 2, hs, hs))
+                        painter.drawRect(QRectF(sr.right() - hs / 2, sr.top() - hs / 2, hs, hs))
+                        painter.drawRect(QRectF(sr.left() - hs / 2, sr.bottom() - hs / 2, hs, hs))
+                        painter.drawRect(QRectF(sr.right() - hs / 2, sr.bottom() - hs / 2, hs, hs))
+
+                        # Delete button
+                        btn_r = 9.0 / zf
+                        btn_center = QPointF(sr.right() + 12.0 / zf, sr.top() - 12.0 / zf)
+                        painter.setPen(Qt.NoPen)
+                        painter.setBrush(QBrush(QColor("#FF3B30")))
+                        painter.drawEllipse(btn_center, btn_r, btn_r)
+                        painter.setPen(QPen(QColor("#FFFFFF"), 1.5 / zf))
+                        del_d = 4.0 / zf
+                        painter.drawLine(QPointF(btn_center.x() - del_d, btn_center.y() - del_d),
+                                         QPointF(btn_center.x() + del_d, btn_center.y() + del_d))
+                        painter.drawLine(QPointF(btn_center.x() + del_d, btn_center.y() - del_d),
+                                         QPointF(btn_center.x() - del_d, btn_center.y() + del_d))
+
+                        # Rotation stalk and circular handle
+                        rot_stem_len = 24.0 / zf
+                        top_mid = QPointF(sr.center().x(), sr.top())
+                        rot_center = QPointF(sr.center().x(), sr.top() - rot_stem_len)
+                        painter.setPen(QPen(QColor("#FF9500"), 1.5 / zf))
+                        painter.drawLine(top_mid, rot_center)
+
+                        rot_r = 8.0 / zf
+                        painter.setPen(QPen(QColor("#FF6D00"), 1.2 / zf))
+                        painter.setBrush(QBrush(QColor("#FF9500")))
+                        painter.drawEllipse(rot_center, rot_r, rot_r)
+                        painter.setPen(QPen(QColor("#4A2600"), 1.2 / zf))
+                        painter.setBrush(QBrush(QColor("#FFFFFF")))
+                        painter.drawEllipse(rot_center, rot_r * 0.45, rot_r * 0.45)
+
+                        painter.restore()
 
                 painter.restore()
             else:

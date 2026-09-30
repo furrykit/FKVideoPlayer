@@ -26,12 +26,12 @@ from PyQt5.QtWidgets import (
 
 try:
     from fkplayer.core.i18n import tr, I18nManager
-    from fkplayer.media.capture import list_open_windows
+    from fkplayer.media.capture import list_open_windows, list_monitors
     from fkplayer.media.audio import get_audio_input_devices, MicLevelMonitor
     from fkplayer.core.logger import get_logger
 except (ImportError, ValueError):
     from ...core.i18n import tr, I18nManager
-    from ...media.capture import list_open_windows
+    from ...media.capture import list_open_windows, list_monitors
     from ...media.audio import get_audio_input_devices, MicLevelMonitor
     from ...core.logger import get_logger
 
@@ -338,6 +338,7 @@ class NewCanvasDialog(QDialog):
 # =========================================================================
 # 2. Window Capture Dialog
 # =========================================================================
+# =========================================================================
 class WindowCaptureDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -345,9 +346,10 @@ class WindowCaptureDialog(QDialog):
             self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setWindowTitle(tr('dlg_capture_title'))
         self.setStyleSheet(DIALOG_STYLE)
-        self.resize(600, 420)
+        self.resize(680, 460)
         self.selected_hwnd = None
         self.selected_title = None
+        self.selected_rect = None
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -356,16 +358,65 @@ class WindowCaptureDialog(QDialog):
         lbl_note.setWordWrap(True)
         layout.addWidget(lbl_note)
 
-        self.table = QTableWidget()
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["Title", "Resolution", "HWND"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SingleSelection)
-        self.table.itemDoubleClicked.connect(self._on_item_double_clicked)
-        layout.addWidget(self.table)
+        self.tabs = QTabWidget()
+        self.tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #2D2D3A;
+                background: #181820;
+                border-radius: 6px;
+            }
+            QTabBar::tab {
+                background: #242430;
+                color: #A0A0B2;
+                padding: 7px 16px;
+                margin-right: 4px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                font-weight: bold;
+            }
+            QTabBar::tab:selected {
+                background: #181820;
+                color: #00E5FF;
+                border-bottom: 2px solid #00E5FF;
+            }
+        """)
+
+        # Tab 1: Monitors
+        tab_monitors = QWidget()
+        layout_mon = QVBoxLayout(tab_monitors)
+        layout_mon.setContentsMargins(6, 6, 6, 6)
+        self.table_monitors = QTableWidget()
+        self.table_monitors.setColumnCount(3)
+        self.table_monitors.setHorizontalHeaderLabels(["Display / Monitor", "Resolution", "Coordinates"])
+        self.table_monitors.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table_monitors.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table_monitors.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table_monitors.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table_monitors.setSelectionMode(QTableWidget.SingleSelection)
+        self.table_monitors.itemDoubleClicked.connect(self._on_item_double_clicked)
+        layout_mon.addWidget(self.table_monitors)
+        self.tabs.addTab(tab_monitors, "🖥️ Full Screen (Monitors)")
+
+        # Tab 2: Windows
+        tab_windows = QWidget()
+        layout_win = QVBoxLayout(tab_windows)
+        layout_win.setContentsMargins(6, 6, 6, 6)
+        self.table_windows = QTableWidget()
+        self.table_windows.setColumnCount(3)
+        self.table_windows.setHorizontalHeaderLabels(["Window Title", "Resolution", "HWND"])
+        self.table_windows.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table_windows.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table_windows.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table_windows.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table_windows.setSelectionMode(QTableWidget.SingleSelection)
+        self.table_windows.itemDoubleClicked.connect(self._on_item_double_clicked)
+        layout_win.addWidget(self.table_windows)
+        self.tabs.addTab(tab_windows, "🪟 Application Windows")
+
+        # Compatibility alias
+        self.table = self.table_windows
+
+        layout.addWidget(self.tabs)
 
         h_btn = QHBoxLayout()
         btn_refresh = QPushButton(tr('dlg_capture_refresh'))
@@ -386,37 +437,67 @@ class WindowCaptureDialog(QDialog):
         self.refresh_windows()
 
     def refresh_windows(self):
-        self.table.setRowCount(0)
+        # Refresh Monitors
+        self.table_monitors.setRowCount(0)
+        monitors = list_monitors()
+        for mon in monitors:
+            row = self.table_monitors.rowCount()
+            self.table_monitors.insertRow(row)
+
+            item_title = QTableWidgetItem(mon['title'])
+            item_res = QTableWidgetItem(f"{mon['width']}x{mon['height']}")
+            rx, ry, rw, rh = mon['rect']
+            item_pos = QTableWidgetItem(f"{rx}, {ry}")
+
+            item_title.setData(Qt.UserRole, mon)
+            self.table_monitors.setItem(row, 0, item_title)
+            self.table_monitors.setItem(row, 1, item_res)
+            self.table_monitors.setItem(row, 2, item_pos)
+
+        if self.table_monitors.rowCount() > 0:
+            self.table_monitors.selectRow(0)
+
+        # Refresh Windows
+        self.table_windows.setRowCount(0)
         windows = list_open_windows()
         for win in windows:
-            row = self.table.rowCount()
-            self.table.insertRow(row)
+            row = self.table_windows.rowCount()
+            self.table_windows.insertRow(row)
 
             item_title = QTableWidgetItem(win['title'])
             item_res = QTableWidgetItem(f"{win['width']}x{win['height']}")
             item_hwnd = QTableWidgetItem(str(win['hwnd']))
 
             item_title.setData(Qt.UserRole, win)
-            self.table.setItem(row, 0, item_title)
-            self.table.setItem(row, 1, item_res)
-            self.table.setItem(row, 2, item_hwnd)
+            self.table_windows.setItem(row, 0, item_title)
+            self.table_windows.setItem(row, 1, item_res)
+            self.table_windows.setItem(row, 2, item_hwnd)
 
-        if self.table.rowCount() > 0:
-            self.table.selectRow(0)
+        if self.table_windows.rowCount() > 0:
+            self.table_windows.selectRow(0)
 
     def _on_item_double_clicked(self, item):
         self._on_start()
 
     def _on_start(self):
-        sel_row = self.table.currentRow()
+        cur_tab = self.tabs.currentIndex()
+        target_table = self.table_monitors if cur_tab == 0 else self.table_windows
+        sel_row = target_table.currentRow()
+
+        if sel_row < 0:
+            # Fallback to other tab if active tab has no selection
+            target_table = self.table_windows if cur_tab == 0 else self.table_monitors
+            sel_row = target_table.currentRow()
+
         if sel_row >= 0:
-            item = self.table.item(sel_row, 0)
-            win_data = item.data(Qt.UserRole)
-            self.selected_hwnd = win_data['hwnd']
-            self.selected_title = win_data['title']
+            item = target_table.item(sel_row, 0)
+            data = item.data(Qt.UserRole)
+            self.selected_hwnd = data.get('hwnd')
+            self.selected_title = data.get('title')
+            self.selected_rect = data.get('rect') if data.get('type') == 'monitor' else None
             self.accept()
         else:
-            QMessageBox.warning(self, "No Window Selected", "Please select a window from the list.")
+            QMessageBox.warning(self, "No Target Selected", "Please select a monitor or window from the list.")
 
 
 # =========================================================================
