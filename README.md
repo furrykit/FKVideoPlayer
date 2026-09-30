@@ -25,40 +25,46 @@
 
 ## Why FKVideoPlayer?
 
-Most video players fall into two extremes:
-- **Media players (VLC, MPC-HC, mpv)** are great for watching movies, but they don't let you draw arrows on a frame, zoom into individual pixels, layer reference clips, or record annotations.
-- **Video editors (Premiere, DaVinci, After Effects)** take minutes to launch, weigh gigabytes, and require creating a full project just to scrub a clip frame-by-frame, mark a bug, and export a 5-second video.
-- **Screen recorders (OBS Studio)** are heavy to configure when you simply want to stream one specific window, record system loopback audio, draw notes over it, and export an MP4.
+Most video tools are built for either passive viewing or heavy production:
+- **Media players (VLC, MPC-HC, mpv)** are tuned for watching movies. They don't let you draw arrows directly on a frame, zoom into raw pixels, layer reference clips, or record synchronized annotations.
+- **NLE editors (Premiere, DaVinci, After Effects)** take minutes to launch, consume gigabytes of RAM, and require creating a full project just to scrub a clip frame-by-frame, highlight a bug, and export a 5-second video.
+- **Screen recorders (OBS Studio)** are complex to configure when you just need to capture a specific window or monitor, record WASAPI audio, draw notes over it in real time, and export an MP4.
 
-**FKVideoPlayer** fills that gap. It is a lightweight, single-binary desktop utility for game developers, QA testers, video analysts, and creators who need fast, precise video inspection and on-screen drawing without the bloat.
+**FKVideoPlayer** bridges this gap: a fast, single-binary desktop utility for game developers, QA engineers, video analysts, and content creators who need instant frame scrubbing, on-screen drawing, and live capture without overhead.
 
 ---
 
-## Highlights
+## Key Features
 
-### 1. Frame-Accurate Playback & Subpixel Zoom
-- **Hardware-Assisted Decoding:** Fast PyAV (FFmpeg) and OpenCV decoders with asynchronous frame caching and LRU memory management.
-- **Micro-Stepping:** Move frame-by-frame forward or backward (`Left` / `Right`, `,` / `.`).
-- **Variable Shuttle Speed:** Smooth playback from **0.05x** ultra slow-motion up to **10.0x** high-speed.
-- **Deep Zoom & Pan:** Inspect small details with zoom levels from 10% to 50x, with 1:1 pixel mode (`1`) and fit-to-view (`F`).
+### 1. Hardware-Accelerated Playback & Precision Scrubbing
+- **Hardware Decoding (NVDEC / CUDA):** Automatic GPU acceleration (`hevc_cuvid`, `h264_cuvid`, `vp9_cuvid`, `av1_cuvid`) with dynamic downscaling for smooth 60 FPS playback on 4K and 8K footage.
+- **Software Fallback:** Multi-threaded PyAV / FFmpeg software engine for hardware-agnostic compatibility.
+- **Frame-by-Frame Stepping:** Micro-step forward and backward (`Left` / `Right`, `,` / `.`).
+- **Variable Shuttle Speed:** Smooth playback from **0.05x** slow-motion up to **10.0x** high-speed with audio sync.
+- **Subpixel Zoom & Pan:** Inspect fine details from 10% to 50x zoom, 1:1 pixel mode (`1`), and fit-to-view (`F`).
 
-### 2. Multi-Track Overlay Timeline
-- **Stacked Clip Tracks:** Drop additional videos, GIFs, images, or text overlays onto your timeline. Each overlay gets an independent track with its own scrubber, visibility toggle, aspect-ratio lock, and deletion handle.
-- **Picture-in-Picture (PIP):** Drag, resize, and position secondary video feeds on top of the main canvas.
-- **Rubber-Band Multi-Selection:** Click and drag a marquee selection to transform or delete multiple overlays at once.
+### 2. Interactive 360° Transformations & Multi-Track Overlays
+- **360-Degree Rotation:** Free-angle rotation handle for brush drawings, text overlays, images, and video clips. Hold `Shift` while dragging to snap in 15° steps.
+- **Stacked Clip Tracks:** Drag and drop videos, GIFs, images, and text onto the canvas. Each overlay gets an independent track with its own scrubber, visibility toggle, aspect-ratio lock, and deletion handle.
+- **Picture-in-Picture (PIP):** Freely move, scale, crop, and layer secondary video streams over the main canvas.
+- **Rubber-Band Multi-Selection:** Select multiple overlays and drawings with a marquee box to move, rotate, or delete them in batch.
+- **Unified Undo/Redo:** `Ctrl + Z` tracks transforms, rotations, deletions, and drawings in one cohesive stack.
 
-### 3. Photoshop-Style Partial Eraser & Vector Annotations
-- **True Carving Eraser:** The eraser cuts holes and removes parts of drawn lines with adjustable radius (`[` and `]`), matching Photoshop and MS Paint behavior instead of deleting the entire stroke.
-- **Drawing Tools:** Freehand brush, highlighter, straight lines, rectangles, circles, and rich text overlays.
+### 3. Photoshop-Style Vector Eraser & Drawing Tools
+- **Physical Carving Eraser:** The eraser cuts through vector strokes and removes only intersecting segments (with adjustable radius via `[` and `]`), matching Photoshop and Paint instead of wiping the entire line.
+- **Single-Step Undo:** Erasing continuously over multiple strokes rolls back cleanly in a single `Ctrl + Z`.
+- **Drawing Tools:** Freehand brush, highlighter, straight lines, rectangles, ellipses, and rich text overlays.
 - **Action Recorder:** Records every cursor gesture, brush stroke, and overlay transformation with millisecond timestamps for instant export or JSON saving.
 
-### 4. Live Window Capture & WASAPI Audio Loopback
-- **Direct Window Streaming:** Hook directly into any active Windows application (games, browsers, emulators) and stream its frames live onto the canvas using optimized Win32 GDI capture.
-- **WASAPI System Loopback Audio:** Records crystal-clear desktop or game sound directly from your audio endpoint without virtual cable drivers.
-- **Voiceover Commentary:** Record your microphone alongside window audio with live volume metering.
+### 4. Full Monitor & Window Capture with WASAPI Audio
+- **Dual Capture Modes:** Capture any active application window or grab the entire monitor / virtual desktop spanning multiple displays.
+- **Low-Latency Streaming:** Optimized Win32 GDI BitBlt capture engine (~2 ms grab latency, up to 60 FPS) with zero handle leaks.
+- **WASAPI Loopback Audio:** Records desktop and application audio directly from the Windows audio pipeline without virtual audio cables.
+- **Mic Voiceover:** Record live microphone commentary alongside desktop audio with real-time volume metering.
 
-### 5. Multi-Project Tabs
-- Work on multiple videos, blank drawing canvases, or live window streams in parallel with isolated timelines, undo/redo stacks, and export settings.
+### 5. Multi-Project Tabs & Zero-Install Binary
+- **Isolated Workspaces:** Work on multiple videos, blank drawing canvases, or live screen streams simultaneously in tabs with separate timelines and undo stacks.
+- **Portable Executable:** Single standalone `.exe` bundle with zero external dependencies.
 
 ---
 
@@ -68,7 +74,7 @@ Get the latest pre-compiled standalone release for Windows:
 
 ### 📦 [Download FKVideoPlayer.exe (GitHub Releases)](https://github.com/furrykit/FKVideoPlayer/releases/latest)
 
-> **No installation required.** Download the single `.exe` file, run it, and start working. Bundled with internal FFmpeg and media decoders.
+> **No installation required.** Download the single `.exe` file and run it. Bundled with internal FFmpeg, hardware decoders, and all dependencies.
 
 ---
 
@@ -80,7 +86,7 @@ Get the latest pre-compiled standalone release for Windows:
 
 ### Quick Start
 ```bash
-# 1. Clone the repository
+# 1. Clone repository
 git clone https://github.com/furrykit/FKVideoPlayer.git
 cd FKVideoPlayer
 
@@ -94,7 +100,7 @@ python player.py
 ```
 
 ### Running Tests
-All 47 unit and integration tests run offline without external dependencies:
+All 56 unit and integration tests run offline without external dependencies:
 ```bash
 python -m unittest discover tests
 # or
@@ -115,14 +121,16 @@ The compiled single-file binary will appear in `dist/FKVideoPlayer.exe`.
 |:---|:---|
 | `Space` | Play / Pause |
 | `Left` / `Right` | Step -1 / +1 Frame |
+| `,` / `.` | Step -1 / +1 Frame |
 | `Ctrl + Left` / `Right` | Seek -1.0s / +1.0s |
 | `Shift + Left` / `Right` | Seek -5.0s / +5.0s |
 | `Home` / `End` | Jump to First / Last Frame |
 | `F` | Fit Canvas to Window |
 | `1` | 1:1 Pixel Scale Mode |
-| `Ctrl + Z` | Undo Last Annotation |
+| `Ctrl + Z` | Undo Last Action (Drawing, Eraser, Move, Rotate, Delete) |
 | `C` | Clear All Annotations |
 | `[` / `]` | Decrease / Increase Brush or Eraser Size |
+| `Shift + Drag Rotate` | Snap Rotation to 15° Increments |
 | `Delete` / `Backspace` | Delete Selected Overlays |
 | `Ctrl + T` | New Project Tab |
 | `Ctrl + W` | Close Current Tab |
@@ -141,10 +149,10 @@ FKVideoPlayer/
 ├── fkplayer/                  # Core package
 │   ├── app.py                 # Application bootstrap and dark titlebar
 │   ├── core/                  # Engine logic (i18n, logger, projects, recorder)
-│   ├── media/                 # Video decoding, Win32 capture, WASAPI audio
+│   ├── media/                 # Video decoding (NVDEC/PyAV), Win32 capture, WASAPI audio
 │   └── ui/                    # Qt widgets, canvas, timeline, dialogs
 ├── tests/
-│   └── test_player.py         # 47 unit and integration tests
+│   └── test_player.py         # 56 unit and integration tests
 ├── FKVideoPlayer.spec         # PyInstaller standalone build specification
 ├── pyproject.toml             # PEP 517/621 build configuration
 ├── requirements.txt           # Production dependencies
