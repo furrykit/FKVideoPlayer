@@ -1847,6 +1847,65 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
         canvas.undo_stack.clear()
         print("[OK] Overlay undo, deletion restore, transform undo, and unified clear verified")
 
+    def test_54_eraser_drag_session_and_version_consistency(self):
+        """Verify continuous eraser drag session with single-step undo and updater version format."""
+        from fkplayer.ui.dialogs import CURRENT_VERSION, UpdatesDialog
+        from fkplayer.core.geometry import APP_VERSION
+        from PyQt5.QtWidgets import QLabel
+        self.assertEqual(CURRENT_VERSION, APP_VERSION)
+        self.assertEqual(APP_VERSION, "1.1.4")
+
+        dlg = UpdatesDialog(parent=self.player)
+        lbls = dlg.findChildren(QLabel)
+        header_text = " ".join([l.text() for l in lbls])
+        self.assertIn("v1.1.4", header_text)
+        self.assertNotIn("vv", header_text)
+
+        # Test simulated GitHub response with tag 'v1.1.4' - should format without double 'v'
+        dlg._on_check_finished({"is_newer": True, "tag_name": "v1.1.4", "download_url": "http://test"})
+        self.assertNotIn("vv", dlg.lbl_status.text())
+        self.assertIn("v1.1.4", dlg.lbl_status.text())
+
+        # Test eraser continuous session
+        canvas = self.player.canvas
+        canvas.zoom_factor = 1.0
+        canvas.strokes.clear()
+        canvas.undo_stack.clear()
+
+        # Stroke from (0, 100) to (300, 100)
+        s = Stroke(QColor("#FF0000"), 4.0, [QPointF(x, 100) for x in range(0, 301, 10)])
+        canvas.strokes.append(s)
+
+        # Simulate dragging the eraser across the stroke:
+        canvas.set_eraser_radius(15.0)
+        canvas._is_erasing = True
+        canvas._eraser_initial_strokes = [st.copy() for st in canvas.strokes]
+        canvas._last_eraser_vpt = QPointF(100, 100)
+        canvas.erase_strokes_at_video_pt(QPointF(100, 100), record_undo=False)
+
+        # Drag to (150, 100)
+        canvas.erase_strokes_at_video_pt(QPointF(150, 100), record_undo=False)
+
+        # End session
+        init_strokes = canvas._eraser_initial_strokes
+        canvas._is_erasing = False
+        canvas.undo_stack.append(('modify_strokes', init_strokes))
+        canvas._eraser_initial_strokes = None
+
+        # Verify stroke was carved
+        self.assertGreater(len(canvas.strokes), 1)
+        self.assertEqual(len(canvas.undo_stack), 1, "Drag session must produce exactly 1 undo entry")
+
+        # One Ctrl+Z restores the entire original stroke
+        canvas.undo_last_action()
+        self.assertEqual(len(canvas.strokes), 1, "Single undo must restore full original stroke")
+        self.assertEqual(len(canvas.strokes[0].points), 31)
+        self.assertEqual(canvas.strokes[0].points[0], QPointF(0, 100))
+        self.assertEqual(canvas.strokes[0].points[-1], QPointF(300, 100))
+
+        dlg.close()
+        print("[OK] Continuous eraser drag session, single-step undo, and updater version format verified")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -177,9 +177,11 @@ def erase_stroke_subsegments(pts: list, center: QPointF, radius: float, stroke_w
             current_run.append(pt)
         else:
             if current_run:
-                new_segments.append(simplify_points(current_run))
+                if len(current_run) >= 2 or len(pts) == 1:
+                    new_segments.append(simplify_points(current_run))
                 current_run = []
     if current_run:
-        new_segments.append(simplify_points(current_run))
+        if len(current_run) >= 2 or len(pts) == 1:
+            new_segments.append(simplify_points(current_run))
 
     return new_segments

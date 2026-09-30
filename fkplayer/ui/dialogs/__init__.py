@@ -1479,7 +1479,7 @@ class WelcomeDialog(QDialog):
 # 7. Updates Dialog & Real GitHub Release Checker
 # =========================================================================
 DEFAULT_REPO_URL = "https://github.com/furrykit/FKVideoPlayer"
-CURRENT_VERSION = "1.1.3"
+from fkplayer.core.geometry import APP_VERSION as CURRENT_VERSION
 
 
 def parse_version(v_str: str) -> tuple:
@@ -1566,7 +1566,8 @@ class UpdatesDialog(QDialog):
 
         # Header info
         h_ver = QHBoxLayout()
-        lbl_cur = QLabel(f"Current version: v{CURRENT_VERSION}")
+        cur_display = CURRENT_VERSION if str(CURRENT_VERSION).startswith('v') else f"v{CURRENT_VERSION}"
+        lbl_cur = QLabel(f"Current version: {cur_display}")
         lbl_cur.setStyleSheet("color: #8E8EA0; font-weight: bold;")
         h_ver.addWidget(lbl_cur)
         h_ver.addStretch()
@@ -1618,20 +1619,22 @@ class UpdatesDialog(QDialog):
     def _on_check_finished(self, data: dict):
         self.btn_check.setEnabled(True)
         is_newer = data.get("is_newer", False)
-        tag = data.get("tag_name", "")
+        tag = data.get("tag_name", "").strip()
         self._download_url = data.get("download_url") or data.get("html_url") or DEFAULT_REPO_URL + "/releases"
+        cur_display = CURRENT_VERSION if str(CURRENT_VERSION).startswith('v') else f"v{CURRENT_VERSION}"
+        tag_display = tag if str(tag).startswith('v') else f"v{tag}"
 
         if is_newer:
-            self.lbl_status.setText(f"{tr('updates_available')} (v{tag})")
+            self.lbl_status.setText(f"{tr('updates_available')} ({tag_display})")
             self.lbl_status.setStyleSheet("color: #34C759; font-weight: bold; font-size: 14px;")
             self.btn_dl.setEnabled(True)
-            body = data.get("body", "").strip() or f"New release {tag} is ready for download."
+            body = data.get("body", "").strip() or f"New release {tag_display} is ready for download."
             self.txt_notes.setPlainText(body)
         else:
-            self.lbl_status.setText(f"{tr('updates_up_to_date')} (v{CURRENT_VERSION})")
+            self.lbl_status.setText(f"{tr('updates_up_to_date')} ({cur_display})")
             self.lbl_status.setStyleSheet("color: #8E8EA0; font-weight: bold; font-size: 14px;")
             self.btn_dl.setEnabled(False)
-            self.txt_notes.setPlainText(f"FKVideoPlayer is up to date (version {CURRENT_VERSION}).")
+            self.txt_notes.setPlainText(f"FKVideoPlayer is up to date (version {cur_display}).")
 
     def _on_check_error(self, err_msg: str):
         self.btn_check.setEnabled(True)

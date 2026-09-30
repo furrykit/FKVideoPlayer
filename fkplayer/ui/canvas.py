@@ -47,6 +47,9 @@ class Stroke:
             self.path.lineTo(p)
         self.points.append(p)
 
+    def copy(self):
+        return Stroke(self.color, self.width, [QPointF(p.x(), p.y()) for p in self.points], stroke_id=self.stroke_id)
+
 
 class OverlayObject:
     TYPE_IMAGE = "image"
@@ -759,14 +762,17 @@ class VideoCanvas(QWidget):
             stroke, original_idx = payload
             idx = min(original_idx, len(self.strokes))
             self.strokes.insert(idx, stroke)
-        elif action_type == 'modify':
-            # payload: list of tuples (orig_stroke, replaced_strokes, orig_idx)
-            for orig_stroke, replaced_strokes, orig_idx in reversed(payload):
-                for r in replaced_strokes:
-                    if r in self.strokes:
-                        self.strokes.remove(r)
-                idx = min(orig_idx, len(self.strokes))
-                self.strokes.insert(idx, orig_stroke)
+        elif action_type in ('modify_strokes', 'modify'):
+            if action_type == 'modify_strokes':
+                self.strokes = [s.copy() for s in payload]
+            else:
+                # payload: list of tuples (orig_stroke, replaced_strokes, orig_idx)
+                for orig_stroke, replaced_strokes, orig_idx in reversed(payload):
+                    for r in replaced_strokes:
+                        if r in self.strokes:
+                            self.strokes.remove(r)
+                    idx = min(orig_idx, len(self.strokes))
+                    self.strokes.insert(idx, orig_stroke)
         elif action_type in ('clear', 'clear_all'):
             if action_type == 'clear_all' or (isinstance(payload, (tuple, list)) and len(payload) == 2 and isinstance(payload[0], list) and isinstance(payload[1], list)):
                 saved_strokes, saved_overlays = payload
@@ -789,12 +795,17 @@ class VideoCanvas(QWidget):
         self.update()
         self.drawing_changed.emit()
 
-    def erase_strokes_at_video_pt(self, video_pt: QPointF):
+    def erase_strokes_at_video_pt(self, video_pt: QPointF, record_undo: bool = None):
         """
         Partial eraser: erases strokes like in MS Paint or Photoshop.
         Cuts out the circle of radius `eraser_radius` from intersecting strokes,
         splitting them into sub-segments rather than blindly deleting whole lines.
         """
+        if record_undo is None:
+            record_undo = not getattr(self, '_is_erasing', False)
+
+        initial_strokes = [s.copy() for s in self.strokes] if record_undo else None
+
         erased_any = False
         radius_video = self.eraser_radius / max(0.01, self.zoom_factor)
         r2 = radius_video * radius_video
@@ -853,8 +864,9 @@ class VideoCanvas(QWidget):
                 erased_ids.append(old_stroke.stroke_id)
             erased_any = True
 
-        if undo_batch:
-            self.undo_stack.append(('modify', undo_batch))
+        if record_undo and erased_any:
+            self.undo_stack.append(('modify_strokes', initial_strokes))
+            self.drawing_changed.emit()
 
         if self.recorder and erased_ids:
             self.recorder.record_erase(erased_ids)
@@ -1193,7 +1205,11 @@ class VideoCanvas(QWidget):
                 self.drawing_changed.emit()
             elif self.active_tool == self.TOOL_ERASER:
                 vpt = self.screen_to_video(pos)
-                self.erase_strokes_at_video_pt(vpt)
+                self._is_erasing = True
+                self._eraser_initial_strokes = [s.copy() for s in self.strokes]
+                self._last_eraser_vpt = vpt
+                self.erase_strokes_at_video_pt(vpt, record_undo=False)
+                self.update()
             elif self.active_tool == self.TOOL_SELECT:
                 vpt = self.screen_to_video(pos)
                 ctrl_or_shift = bool(event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier))
@@ -1271,7 +1287,24 @@ class VideoCanvas(QWidget):
                 self.update()
             elif self.active_tool == self.TOOL_ERASER:
                 vpt = self.screen_to_video(pos)
-                self.erase_strokes_at_video_pt(vpt)
+                if getattr(self, '_is_erasing', False) and getattr(self, '_last_eraser_vpt', None):
+                    dx = vpt.x() - self._last_eraser_vpt.x()
+                    dy = vpt.y() - self._last_eraser_vpt.y()
+                    dist = math.hypot(dx, dy)
+                    radius_video = self.eraser_radius / max(0.01, self.zoom_factor)
+                    step = max(2.0, radius_video * 0.35)
+                    n_steps = max(1, int(dist / step))
+                    for i in range(1, n_steps + 1):
+                        t = i / float(n_steps)
+                        pt = QPointF(
+                            self._last_eraser_vpt.x() + t * dx,
+                            self._last_eraser_vpt.y() + t * dy
+                        )
+                        self.erase_strokes_at_video_pt(pt, record_undo=False)
+                else:
+                    self.erase_strokes_at_video_pt(vpt, record_undo=False)
+                self._last_eraser_vpt = vpt
+                self.update()
             elif self.active_tool == self.TOOL_SELECT and self.selected_overlays and self._overlay_drag_mode:
                 vpt = self.screen_to_video(pos)
                 dx = vpt.x() - self._drag_start_vpt.x()
@@ -1416,6 +1449,23 @@ class VideoCanvas(QWidget):
                 self._drag_start_vpt = None
                 self._drag_start_rect = None
                 self._drag_start_rects = {}
+                self.update()
+
+            if getattr(self, '_is_erasing', False):
+                self._is_erasing = False
+                self._last_eraser_vpt = None
+                init_strokes = getattr(self, '_eraser_initial_strokes', None)
+                if init_strokes is not None:
+                    changed = len(init_strokes) != len(self.strokes)
+                    if not changed:
+                        for s_old, s_new in zip(init_strokes, self.strokes):
+                            if len(s_old.points) != len(s_new.points):
+                                changed = True
+                                break
+                    if changed:
+                        self.undo_stack.append(('modify_strokes', init_strokes))
+                        self.drawing_changed.emit()
+                self._eraser_initial_strokes = None
                 self.update()
 
     def keyPressEvent(self, event):
