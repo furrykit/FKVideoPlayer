@@ -125,6 +125,8 @@ class TabManagerMixin:
         self._update_time_label()
         self.setWindowTitle(f"FKVideoPlayer — {proj.name}")
         self._refresh_overlay_tracks()
+        if hasattr(self, '_update_transform_ui'):
+            self._update_transform_ui()
         proj.canvas.update()
 
     def _on_tab_close_requested(self, index: int):

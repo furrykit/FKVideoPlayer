@@ -15,7 +15,7 @@ from PIL import Image, ImageSequence
 from PyQt5.QtCore import Qt, QPointF, QRectF, pyqtSignal, QTimer
 from PyQt5.QtGui import (
     QImage, QPixmap, QPainter, QPen, QColor, QBrush, QCursor, QFont,
-    QPainterPath
+    QPainterPath, QTransform
 )
 from PyQt5.QtWidgets import (
     QWidget, QMenu
@@ -419,6 +419,9 @@ class VideoCanvas(QWidget):
 
         self.zoom_factor = 1.0
         self.pan_offset = QPointF(0, 0)
+        self.flip_h = False
+        self.flip_v = False
+        self.canvas_rotation = 0
         self.is_panning = False
         self.last_mouse_pos = QPointF(0, 0)
         self._press_pos = None
@@ -694,6 +697,44 @@ class VideoCanvas(QWidget):
     def set_bgr_frame(self, frame_bgr):
         self.set_frame(frame_bgr)
 
+    def get_canvas_transform(self) -> QTransform:
+        zf = max(1e-4, self.zoom_factor)
+        t = QTransform()
+        t.translate(self.width() / 2.0 + self.pan_offset.x(), self.height() / 2.0 + self.pan_offset.y())
+        sx = zf * (-1.0 if self.flip_h else 1.0)
+        sy = zf * (-1.0 if self.flip_v else 1.0)
+        t.scale(sx, sy)
+        if self.canvas_rotation != 0:
+            t.rotate(self.canvas_rotation)
+        t.translate(-self.video_width / 2.0, -self.video_height / 2.0)
+        return t
+
+    def flip_horizontal(self, *args):
+        self.flip_h = not self.flip_h
+        self.update()
+
+    def flip_vertical(self, *args):
+        self.flip_v = not self.flip_v
+        self.update()
+
+    def rotate_cw(self, *args):
+        self.canvas_rotation = (self.canvas_rotation + 90) % 360
+        self.update()
+
+    def rotate_ccw(self, *args):
+        self.canvas_rotation = (self.canvas_rotation - 90) % 360
+        self.update()
+
+    def rotate_180(self, *args):
+        self.canvas_rotation = (self.canvas_rotation + 180) % 360
+        self.update()
+
+    def reset_canvas_transform(self, *args):
+        self.flip_h = False
+        self.flip_v = False
+        self.canvas_rotation = 0
+        self.update()
+
     def fit_to_view(self, *args):
         if self.video_width <= 0 or self.video_height <= 0:
             self.zoom_factor = 1.0
@@ -702,11 +743,18 @@ class VideoCanvas(QWidget):
             self.zoom_changed.emit(self.zoom_factor)
             return
 
+        if self.canvas_rotation in (90, 270):
+            eff_w = float(self.video_height)
+            eff_h = float(self.video_width)
+        else:
+            eff_w = float(self.video_width)
+            eff_h = float(self.video_height)
+
         canvas_w = max(10, self.width())
         canvas_h = max(10, self.height())
 
-        scale_w = canvas_w / float(self.video_width)
-        scale_h = canvas_h / float(self.video_height)
+        scale_w = canvas_w / eff_w
+        scale_h = canvas_h / eff_h
         self.zoom_factor = min(scale_w, scale_h) * 0.96
         self.pan_offset = QPointF(0, 0)
         self.update()
@@ -729,20 +777,10 @@ class VideoCanvas(QWidget):
         if abs(target_zoom - self.zoom_factor) < 1e-4:
             return
 
-        old_zoom = max(1e-4, self.zoom_factor)
-        old_origin = self._get_origin(old_zoom, self.pan_offset)
-
-        video_x = (center_pt.x() - old_origin.x()) / old_zoom
-        video_y = (center_pt.y() - old_origin.y()) / old_zoom
-
-        new_origin_x = center_pt.x() - video_x * target_zoom
-        new_origin_y = center_pt.y() - video_y * target_zoom
-
-        base_origin_x = (self.width() - self.video_width * target_zoom) / 2.0
-        base_origin_y = (self.height() - self.video_height * target_zoom) / 2.0
-
-        self.pan_offset = QPointF(new_origin_x - base_origin_x, new_origin_y - base_origin_y)
+        v_pt = self.screen_to_video(center_pt)
         self.zoom_factor = target_zoom
+        s_new = self.video_to_screen(v_pt)
+        self.pan_offset += center_pt - s_new
         self.update()
         self.zoom_changed.emit(self.zoom_factor)
 
@@ -752,17 +790,14 @@ class VideoCanvas(QWidget):
         return QPointF(ox, oy)
 
     def screen_to_video(self, pt: QPointF) -> QPointF:
-        zf = max(1e-4, self.zoom_factor)
-        origin = self._get_origin(zf, self.pan_offset)
-        vx = (pt.x() - origin.x()) / zf
-        vy = (pt.y() - origin.y()) / zf
-        return QPointF(vx, vy)
+        t = self.get_canvas_transform()
+        inv_t, invertible = t.inverted()
+        if invertible:
+            return inv_t.map(pt)
+        return pt
 
     def video_to_screen(self, pt: QPointF) -> QPointF:
-        origin = self._get_origin(self.zoom_factor, self.pan_offset)
-        sx = origin.x() + pt.x() * self.zoom_factor
-        sy = origin.y() + pt.y() * self.zoom_factor
-        return QPointF(sx, sy)
+        return self.get_canvas_transform().map(pt)
 
     def clear_all_drawings(self, *args):
         if not self.strokes and not self.overlays:
@@ -1239,6 +1274,13 @@ class VideoCanvas(QWidget):
         menu.addSeparator()
         act_fit = menu.addAction("📐 Fit to View")
         act_100 = menu.addAction("🔍 Reset Zoom 1:1")
+        menu.addSeparator()
+        act_flip_h = menu.addAction("⇄ Flip Horizontal (Shift+H)")
+        act_flip_v = menu.addAction("⇅ Flip Vertical (Shift+V)")
+        act_rot_cw = menu.addAction("↻ Rotate 90° CW (Ctrl+])")
+        act_rot_ccw = menu.addAction("↺ Rotate 90° CCW (Ctrl+[)")
+        act_rot_180 = menu.addAction("⟳ Rotate 180°")
+        act_reset_tx = menu.addAction("↺ Reset Orientation")
 
         player = self.window()
         chosen = menu.exec_(global_pos)
@@ -1256,6 +1298,30 @@ class VideoCanvas(QWidget):
             self.fit_to_view()
         elif chosen == act_100:
             self.reset_zoom_100()
+        elif chosen == act_flip_h:
+            self.flip_horizontal()
+            if hasattr(player, '_update_transform_ui'):
+                player._update_transform_ui()
+        elif chosen == act_flip_v:
+            self.flip_vertical()
+            if hasattr(player, '_update_transform_ui'):
+                player._update_transform_ui()
+        elif chosen == act_rot_cw:
+            self.rotate_cw()
+            if hasattr(player, '_update_transform_ui'):
+                player._update_transform_ui()
+        elif chosen == act_rot_ccw:
+            self.rotate_ccw()
+            if hasattr(player, '_update_transform_ui'):
+                player._update_transform_ui()
+        elif chosen == act_rot_180:
+            self.rotate_180()
+            if hasattr(player, '_update_transform_ui'):
+                player._update_transform_ui()
+        elif chosen == act_reset_tx:
+            self.reset_canvas_transform()
+            if hasattr(player, '_update_transform_ui'):
+                player._update_transform_ui()
 
     def contextMenuEvent(self, event):
         vpt = self.screen_to_video(QPointF(event.pos()))
@@ -1923,13 +1989,10 @@ class VideoCanvas(QWidget):
                 painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
 
             painter.fillRect(self.rect(), QColor("#121216"))
-            zf = max(1e-4, self.zoom_factor)
-            origin = self._get_origin(zf, self.pan_offset)
 
             if self.current_qimage is not None and not self.current_qimage.isNull():
                 painter.save()
-                painter.translate(origin.x(), origin.y())
-                painter.scale(zf, zf)
+                painter.setWorldTransform(self.get_canvas_transform(), combine=False)
 
                 painter.drawImage(0, 0, self.current_qimage)
                 painter.setPen(QPen(QColor(60, 60, 75, 180), 1.0 / zf))
@@ -2087,6 +2150,34 @@ class VideoCanvas(QWidget):
                         painter.restore()
 
                 painter.restore()
+
+                badges = []
+                if self.flip_h:
+                    badges.append("Flip H")
+                if self.flip_v:
+                    badges.append("Flip V")
+                if self.canvas_rotation != 0:
+                    badges.append(f"{self.canvas_rotation}°")
+                if badges:
+                    badge_text = " • ".join(badges)
+                    painter.save()
+                    badge_font = QFont("Segoe UI", 9, QFont.Bold)
+                    painter.setFont(badge_font)
+                    fm = painter.fontMetrics()
+                    tw = fm.horizontalAdvance(badge_text) if hasattr(fm, 'horizontalAdvance') else fm.width(badge_text)
+                    th = fm.height()
+                    pad_x, pad_y = 10, 4
+                    bw = tw + pad_x * 2
+                    bh = th + pad_y * 2
+                    bx = self.width() - bw - 14
+                    by = 14
+                    badge_rect = QRectF(bx, by, bw, bh)
+                    painter.setPen(QPen(QColor("#00E5FF"), 1.0))
+                    painter.setBrush(QBrush(QColor(20, 24, 34, 215)))
+                    painter.drawRoundedRect(badge_rect, 6, 6)
+                    painter.setPen(QColor("#00E5FF"))
+                    painter.drawText(badge_rect, Qt.AlignCenter, badge_text)
+                    painter.restore()
             else:
                 painter.setPen(QColor("#7E7E94"))
                 painter.setFont(QFont("Segoe UI", 13, QFont.Bold))

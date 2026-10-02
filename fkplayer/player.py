@@ -424,6 +424,65 @@ class FKVideoPlayer(
         if c:
             c.fit_to_view(*args)
 
+    def flip_canvas_horizontal(self, *args):
+        c = self.canvas
+        if c:
+            c.flip_horizontal()
+            self._update_transform_ui()
+
+    def flip_canvas_vertical(self, *args):
+        c = self.canvas
+        if c:
+            c.flip_vertical()
+            self._update_transform_ui()
+
+    def rotate_canvas_cw(self, *args):
+        c = self.canvas
+        if c:
+            c.rotate_cw()
+            self._update_transform_ui()
+
+    def rotate_canvas_ccw(self, *args):
+        c = self.canvas
+        if c:
+            c.rotate_ccw()
+            self._update_transform_ui()
+
+    def rotate_canvas_180(self, *args):
+        c = self.canvas
+        if c:
+            c.rotate_180()
+            self._update_transform_ui()
+
+    def reset_canvas_transform(self, *args):
+        c = self.canvas
+        if c:
+            c.reset_canvas_transform()
+            self._update_transform_ui()
+
+    def _update_transform_ui(self):
+        c = self.canvas
+        if not c:
+            return
+        is_fh = bool(getattr(c, 'flip_h', False))
+        is_fv = bool(getattr(c, 'flip_v', False))
+        if hasattr(self, 'btn_flip_h'):
+            self.btn_flip_h.blockSignals(True)
+            self.btn_flip_h.setChecked(is_fh)
+            self.btn_flip_h.blockSignals(False)
+        if hasattr(self, 'btn_flip_v'):
+            self.btn_flip_v.blockSignals(True)
+            self.btn_flip_v.setChecked(is_fv)
+            self.btn_flip_v.blockSignals(False)
+        if hasattr(self, 'act_flip_h'):
+            self.act_flip_h.blockSignals(True)
+            self.act_flip_h.setChecked(is_fh)
+            self.act_flip_h.blockSignals(False)
+        if hasattr(self, 'act_flip_v'):
+            self.act_flip_v.blockSignals(True)
+            self.act_flip_v.setChecked(is_fv)
+            self.act_flip_v.blockSignals(False)
+
     def open_preferences_dialog(self, *args):
         dlg = PreferencesDialog(parent=self)
         dlg.hotkeys_updated.connect(self._setup_shortcuts)

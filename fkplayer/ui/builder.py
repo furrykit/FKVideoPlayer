@@ -290,6 +290,25 @@ class UIBuilderMixin:
         layout.addWidget(self.btn_zoom_in)
         layout.addWidget(self.btn_zoom_reset)
 
+        self._add_separator(layout)
+
+        self.btn_flip_h = QPushButton(tr('btn_flip_h'))
+        self.btn_flip_h.setToolTip(tr('act_flip_h'))
+        self.btn_flip_h.setCheckable(True)
+        self.btn_flip_h.clicked.connect(self.flip_canvas_horizontal)
+        layout.addWidget(self.btn_flip_h)
+
+        self.btn_flip_v = QPushButton(tr('btn_flip_v'))
+        self.btn_flip_v.setToolTip(tr('act_flip_v'))
+        self.btn_flip_v.setCheckable(True)
+        self.btn_flip_v.clicked.connect(self.flip_canvas_vertical)
+        layout.addWidget(self.btn_flip_v)
+
+        self.btn_rotate_cw = QPushButton(tr('btn_rotate_cw'))
+        self.btn_rotate_cw.setToolTip(tr('act_rotate_cw'))
+        self.btn_rotate_cw.clicked.connect(self.rotate_canvas_cw)
+        layout.addWidget(self.btn_rotate_cw)
+
         layout.addStretch(1)
 
         self.lbl_rec_status = QLabel("● Recording idle")
@@ -469,6 +488,13 @@ class UIBuilderMixin:
         reg_sc("-", self.zoom_out)
         reg_sc("0", self.fit_to_view)
 
+        reg_sc("Shift+H", self.flip_canvas_horizontal)
+        reg_sc("Shift+V", self.flip_canvas_vertical)
+        reg_sc("Ctrl+]", self.rotate_canvas_cw)
+        reg_sc("Ctrl+[", self.rotate_canvas_ccw)
+        reg_sc("Alt+Right", self.rotate_canvas_cw)
+        reg_sc("Alt+Left", self.rotate_canvas_ccw)
+
         reg_sc(cfg_hotkeys.get("tool_brush", "P"), lambda: self._select_tool(VideoCanvas.TOOL_PEN))
         reg_sc("B", lambda: self._select_tool(VideoCanvas.TOOL_PEN))
         reg_sc(cfg_hotkeys.get("tool_eraser", "E"), lambda: self._select_tool(VideoCanvas.TOOL_ERASER))
@@ -510,6 +536,15 @@ class UIBuilderMixin:
         self.btn_rec_pause.setToolTip(tr('btn_record_pause'))
         self.btn_rec_stop.setToolTip(tr('btn_record_stop'))
         self.btn_rec_export.setToolTip(tr('act_export_video'))
+        if hasattr(self, 'btn_flip_h'):
+            self.btn_flip_h.setText(tr('btn_flip_h'))
+            self.btn_flip_h.setToolTip(tr('act_flip_h'))
+        if hasattr(self, 'btn_flip_v'):
+            self.btn_flip_v.setText(tr('btn_flip_v'))
+            self.btn_flip_v.setToolTip(tr('act_flip_v'))
+        if hasattr(self, 'btn_rotate_cw'):
+            self.btn_rotate_cw.setText(tr('btn_rotate_cw'))
+            self.btn_rotate_cw.setToolTip(tr('act_rotate_cw'))
         self.menuBar().clear()
         self._create_menu_bar()
 
@@ -835,6 +870,19 @@ class UIBuilderMixin:
         self.menu_file.addAction(tr('act_load_actions'), self.load_actions_json)
         self.menu_file.addSeparator()
         self.menu_file.addAction(tr('act_exit'), self.close, QKeySequence("Ctrl+Q"))
+
+        # View Menu
+        self.menu_view = menubar.addMenu(tr('menu_view'))
+        self.act_flip_h = self.menu_view.addAction(tr('act_flip_h'), self.flip_canvas_horizontal, QKeySequence("Shift+H"))
+        self.act_flip_h.setCheckable(True)
+        self.act_flip_v = self.menu_view.addAction(tr('act_flip_v'), self.flip_canvas_vertical, QKeySequence("Shift+V"))
+        self.act_flip_v.setCheckable(True)
+        self.menu_view.addSeparator()
+        self.act_rotate_cw = self.menu_view.addAction(tr('act_rotate_cw'), self.rotate_canvas_cw, QKeySequence("Ctrl+]"))
+        self.act_rotate_ccw = self.menu_view.addAction(tr('act_rotate_ccw'), self.rotate_canvas_ccw, QKeySequence("Ctrl+["))
+        self.act_rotate_180 = self.menu_view.addAction(tr('act_rotate_180'), self.rotate_canvas_180)
+        self.menu_view.addSeparator()
+        self.act_reset_transform = self.menu_view.addAction(tr('act_reset_transform'), self.reset_canvas_transform)
 
         # Settings Menu
         self.menu_settings = menubar.addMenu(tr('menu_settings'))

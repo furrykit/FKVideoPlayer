@@ -2104,6 +2104,130 @@ class TestEnhancedVideoPlayer(unittest.TestCase):
 
         print("[OK] Accelerated export pipeline, hardware auto-detect, fast-path bypass, and software fallback verified")
 
+    def test_58_canvas_flip_and_rotation_transforms(self):
+        """Test canvas horizontal/vertical flips, 90/180 rotation, coordinate reversibility, zoom invariance, and tab state isolation."""
+        canvas = self.player.canvas
+        self.assertIsNotNone(canvas)
+        canvas.video_width = 1920
+        canvas.video_height = 1080
+        canvas.zoom_factor = 1.0
+        canvas.pan_offset = QPointF(0, 0)
+
+        # 1. Verify default transform state
+        self.assertFalse(canvas.flip_h)
+        self.assertFalse(canvas.flip_v)
+        self.assertEqual(canvas.canvas_rotation, 0)
+
+        # 2. Test horizontal flip toggling
+        self.player.flip_canvas_horizontal()
+        self.assertTrue(canvas.flip_h)
+        self.assertTrue(self.player.btn_flip_h.isChecked())
+        self.assertTrue(self.player.act_flip_h.isChecked())
+
+        self.player.flip_canvas_horizontal()
+        self.assertFalse(canvas.flip_h)
+        self.assertFalse(self.player.btn_flip_h.isChecked())
+
+        # 3. Test vertical flip toggling
+        self.player.flip_canvas_vertical()
+        self.assertTrue(canvas.flip_v)
+        self.assertTrue(self.player.btn_flip_v.isChecked())
+        self.assertTrue(self.player.act_flip_v.isChecked())
+
+        self.player.flip_canvas_vertical()
+        self.assertFalse(canvas.flip_v)
+        self.assertFalse(self.player.btn_flip_v.isChecked())
+
+        # 4. Test clockwise rotation cycling
+        self.player.rotate_canvas_cw()
+        self.assertEqual(canvas.canvas_rotation, 90)
+        self.player.rotate_canvas_cw()
+        self.assertEqual(canvas.canvas_rotation, 180)
+        self.player.rotate_canvas_cw()
+        self.assertEqual(canvas.canvas_rotation, 270)
+        self.player.rotate_canvas_cw()
+        self.assertEqual(canvas.canvas_rotation, 0)
+
+        # 5. Test counter-clockwise rotation cycling
+        self.player.rotate_canvas_ccw()
+        self.assertEqual(canvas.canvas_rotation, 270)
+        self.player.rotate_canvas_ccw()
+        self.assertEqual(canvas.canvas_rotation, 180)
+        self.player.rotate_canvas_ccw()
+        self.assertEqual(canvas.canvas_rotation, 90)
+        self.player.rotate_canvas_ccw()
+        self.assertEqual(canvas.canvas_rotation, 0)
+
+        # 6. Test 180-degree rotation and reset
+        self.player.rotate_canvas_180()
+        self.assertEqual(canvas.canvas_rotation, 180)
+        self.player.flip_canvas_horizontal()
+        self.player.flip_canvas_vertical()
+        self.assertTrue(canvas.flip_h)
+        self.assertTrue(canvas.flip_v)
+
+        self.player.reset_canvas_transform()
+        self.assertFalse(canvas.flip_h)
+        self.assertFalse(canvas.flip_v)
+        self.assertEqual(canvas.canvas_rotation, 0)
+        self.assertFalse(self.player.btn_flip_h.isChecked())
+        self.assertFalse(self.player.btn_flip_v.isChecked())
+
+        # 7. Test coordinate mapping reversibility under all orientation permutations
+        test_screen_points = [
+            QPointF(0, 0),
+            QPointF(100, 100),
+            QPointF(640, 360),
+            QPointF(1280, 720),
+            QPointF(-50, 400),
+        ]
+        for fh in (False, True):
+            for fv in (False, True):
+                for rot in (0, 90, 180, 270):
+                    canvas.flip_h = fh
+                    canvas.flip_v = fv
+                    canvas.canvas_rotation = rot
+                    canvas.zoom_factor = 1.35
+                    canvas.pan_offset = QPointF(37.5, -42.0)
+                    for spt in test_screen_points:
+                        vpt = canvas.screen_to_video(spt)
+                        spt_back = canvas.video_to_screen(vpt)
+                        self.assertAlmostEqual(spt.x(), spt_back.x(), places=4)
+                        self.assertAlmostEqual(spt.y(), spt_back.y(), places=4)
+
+        # 8. Test zoom invariant under flip and rotation
+        canvas.flip_h = True
+        canvas.flip_v = False
+        canvas.canvas_rotation = 90
+        anchor = QPointF(500, 300)
+        v_before = canvas.screen_to_video(anchor)
+        canvas.apply_zoom_at(2.5, anchor)
+        s_after = canvas.video_to_screen(v_before)
+        self.assertAlmostEqual(anchor.x(), s_after.x(), places=4)
+        self.assertAlmostEqual(anchor.y(), s_after.y(), places=4)
+
+        # 9. Test fit_to_view effective dimensions swapping on 90/270 rotation
+        canvas.canvas_rotation = 90
+        canvas.fit_to_view()
+        self.assertGreater(canvas.zoom_factor, 0.0)
+
+        # 10. Test multi-tab isolation: Tab 1 flip does not flip Tab 2
+        if len(self.player.projects) >= 1:
+            p0 = self.player.projects[0]
+            p0.canvas.flip_h = True
+            p0.canvas.canvas_rotation = 90
+            self.player.new_project_tab()
+            p1 = self.player.projects[-1]
+            self.assertFalse(p1.canvas.flip_h, "New tab canvas must not inherit Tab 0 flip")
+            self.assertEqual(p1.canvas.canvas_rotation, 0, "New tab canvas must not inherit Tab 0 rotation")
+            # Switch back to Tab 0 and check UI update
+            self.player.project_tabs.setCurrentIndex(0)
+            self.assertTrue(self.player.btn_flip_h.isChecked(), "Switching to Tab 0 must restore button check state")
+
+        # Cleanup reset
+        canvas.reset_canvas_transform()
+        print("[OK] Canvas flip, rotation, coordinate reversibility, zoom invariance, and tab state isolation verified")
+
 
 if __name__ == "__main__":
     unittest.main()
